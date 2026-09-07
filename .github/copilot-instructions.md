@@ -402,7 +402,15 @@ gains `feed={id}` (only stories with ≥1 source article from that feed) and a
 feeds having stories — any authenticated user, since feeds CRUD is admin-only
 but everyone can filter. The Stories page toolbar has a feed dropdown
 (transient — NOT a persisted per-user pref like filter/sort/order; the Feeds
-page count badge links to `/?feed=N` which the page reads on mount).
+page count badge links to `/?feed=N` which the page reads on mount). On touch
+devices (`pointer: coarse`, same gate as the deck) the toolbar keeps only the
+All/Unread/Updated pills plus a "Filters" funnel button with an active-count
+badge — the feed/category/sort selects and the order toggle live in an
+iOS-style bottom sheet (`filterSheetOpen`, full-width selects at `font-size:
+1rem` so iOS doesn't auto-zoom on focus, safe-area bottom padding, backdrop +
+z-40/41 pattern copied from ShareButton) — the inline `.tools` row only
+renders on desktop, since the feed select's long titles overflowed a phone
+toolbar and side-scrolled the PWA.
 `GET /api/feeds` now reports `story_count`/`unread_story_count` per feed
 (unread is per the requesting user; `FeedOut` defaults them to 0 so
 single-feed endpoints stay valid — the GUI re-lists after every mutation).

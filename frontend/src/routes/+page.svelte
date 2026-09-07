@@ -19,6 +19,12 @@
   let feedId = $state(0);
   let sort = $state<Sort>('published');
   let order = $state<Order>('asc');
+  // Mobile filter sheet — three selects + the direction toggle don't fit next
+  // to the pills on a phone (the feed select alone overflows with long feed
+  // titles), so advanced filters live in a bottom sheet on touch devices.
+  let filterSheetOpen = $state(false);
+  // Badge on the Filters button: how many advanced filters are non-default.
+  let advFilters = $derived((feedId ? 1 : 0) + (category ? 1 : 0));
   let loading = $state(true);
   let isMobile = $state(false);
   let readeckEnabled = $state(false);
@@ -343,34 +349,92 @@
         </button>
       {/each}
     </div>
-    <div class="tools">
-      {#if feedOptions.length}
-        <select bind:value={feedId} onchange={load} title="Only stories with a source from this feed">
+    {#if isMobile}
+      <button
+        class="filterbtn"
+        onclick={() => (filterSheetOpen = true)}
+        aria-haspopup="dialog"
+        title="Feed, category and sort filters"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M22 3H2l8 9.46V19l4 2v-8.54z" />
+        </svg>
+        Filters
+        {#if advFilters}<span class="fbadge">{advFilters}</span>{/if}
+      </button>
+    {:else}
+      <div class="tools">
+        {#if feedOptions.length}
+          <select bind:value={feedId} onchange={load} title="Only stories with a source from this feed">
+            <option value={0}>All feeds</option>
+            {#each feedOptions as f (f.id)}<option value={f.id}>{f.kind === 'mail' ? '✉ ' : ''}{f.title || f.url}</option>{/each}
+          </select>
+        {/if}
+        {#if categories.length}
+          <select bind:value={category} onchange={load}>
+            <option value="">All categories</option>
+            {#each categories as c (c.id)}<option value={c.name}>{c.name}</option>{/each}
+          </select>
+        {/if}
+        <select bind:value={sort} onchange={() => { savePrefs(); load(); }}>
+          <option value="published">Article date</option>
+          <option value="updated">Processing date</option>
+          <option value="sources">Source count</option>
+        </select>
+        <button
+          class="dir"
+          title={order === 'desc' ? 'Newest / most first — click to reverse' : 'Oldest / least first — click to reverse'}
+          onclick={() => { order = order === 'desc' ? 'asc' : 'desc'; savePrefs(); load(); }}
+        >
+          {order === 'desc' ? '↓' : '↑'}
+        </button>
+      </div>
+    {/if}
+  </div>
+</div>
+
+{#if filterSheetOpen}
+  <!-- iOS-style bottom sheet for the advanced filters (touch devices only).
+       Backdrop + z-index pattern follows ShareButton.svelte; changes apply
+       immediately, the sheet stays open until Done/backdrop. -->
+  <button class="sheetbg" aria-label="Close filters" onclick={() => (filterSheetOpen = false)} tabindex="-1"></button>
+  <div class="filtersheet" role="dialog" aria-label="Story filters">
+    {#if feedOptions.length}
+      <label>
+        Feed
+        <select bind:value={feedId} onchange={load}>
           <option value={0}>All feeds</option>
           {#each feedOptions as f (f.id)}<option value={f.id}>{f.kind === 'mail' ? '✉ ' : ''}{f.title || f.url}</option>{/each}
         </select>
-      {/if}
-      {#if categories.length}
+      </label>
+    {/if}
+    {#if categories.length}
+      <label>
+        Category
         <select bind:value={category} onchange={load}>
           <option value="">All categories</option>
           {#each categories as c (c.id)}<option value={c.name}>{c.name}</option>{/each}
         </select>
-      {/if}
+      </label>
+    {/if}
+    <label>
+      Sort by
       <select bind:value={sort} onchange={() => { savePrefs(); load(); }}>
         <option value="published">Article date</option>
         <option value="updated">Processing date</option>
         <option value="sources">Source count</option>
       </select>
-      <button
-        class="dir"
-        title={order === 'desc' ? 'Newest / most first — click to reverse' : 'Oldest / least first — click to reverse'}
-        onclick={() => { order = order === 'desc' ? 'asc' : 'desc'; savePrefs(); load(); }}
-      >
-        {order === 'desc' ? '↓' : '↑'}
-      </button>
-    </div>
+    </label>
+    <button
+      class="orderbtn"
+      onclick={() => { order = order === 'desc' ? 'asc' : 'desc'; savePrefs(); load(); }}
+    >
+      {order === 'desc' ? '↓ Newest / most first' : '↑ Oldest / least first'}
+    </button>
+    <button class="done" onclick={() => (filterSheetOpen = false)}>Done</button>
   </div>
-</div>
+{/if}
 
 {#if loading}
   <div class="card"><p>Loading…</p></div>
@@ -571,11 +635,42 @@
   .tools { display: flex; gap: 0.4rem; align-items: center; }
   .tools select { max-width: 10rem; }
   @media (max-width: 700px) {
-    /* two tidy rows: filters on one line, selects+dir on the next */
-    .filters { flex: 1 1 100%; }
-    .tools { flex: 1 1 auto; }
-    .tools select { flex: 1 1 auto; min-width: 0; max-width: none; }
+    /* touch layout: pills + a single Filters button share one row; the
+       advanced filters live in the bottom sheet (filterSheetOpen) */
+    .filters { flex: 1 1 auto; }
+    .filterbtn { flex-shrink: 0; }
   }
+  .filterbtn {
+    border: 1px solid var(--border-strong); background: var(--surface); color: inherit;
+    border-radius: 999px; padding: 0.25rem 0.8rem;
+    display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;
+  }
+  .fbadge {
+    background: var(--accent); color: var(--bg); border-radius: 999px;
+    font-size: 0.72em; font-weight: 700; padding: 0 0.4rem; line-height: 1.5;
+  }
+  .sheetbg {
+    position: fixed; inset: 0; z-index: 40;
+    background: rgb(0 0 0 / 0.45); border: none; padding: 0; cursor: default;
+  }
+  .filtersheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 41;
+    display: flex; flex-direction: column; gap: 0.7rem;
+    max-height: 80dvh; overflow-y: auto;
+    padding: 1rem 1rem calc(1rem + env(safe-area-inset-bottom));
+    background: var(--surface); border: 1px solid var(--border); border-bottom: none;
+    border-radius: 14px 14px 0 0; box-shadow: 0 -8px 32px rgb(0 0 0 / 0.35);
+  }
+  .filtersheet label {
+    display: flex; flex-direction: column; gap: 0.25rem;
+    font-size: 0.85rem; color: var(--muted);
+  }
+  /* 1rem minimum: smaller font sizes make iOS auto-zoom on focus */
+  .filtersheet select {
+    width: 100%; font-size: 1rem; padding: 0.55rem 0.6rem; color: var(--text);
+  }
+  .filtersheet .orderbtn, .filtersheet .done { padding: 0.6rem; }
+  .filtersheet .done { font-weight: 600; }
   .dir {
     border: 1px solid var(--border-strong); background: var(--surface); color: inherit; border-radius: 6px;
     padding: 0.25rem 0.6rem; font-size: 1rem; line-height: 1; cursor: pointer;
