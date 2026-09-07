@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     embed_model: str = "bge-m3"
     llm_timeout_s: float = 120.0
 
+    # Live LLM interaction trace (Activity page): in-memory only, never written
+    # to the DB; broadcasts truncated prompts/replies over the activity SSE stream.
+    llm_trace_enabled: bool = True
+    llm_trace_max_chars: int = 8000  # per text field, longer text is clamped
+
     # Language policy (SPEC §1): summaries/embeddings in this language; GUI English-only
     summary_language: str = "en"
 
@@ -69,6 +74,19 @@ class Settings(BaseSettings):
     # First-poll backfill window (SPEC §9): on a feed's first poll, skip entries
     # older than this many days. 0 = import everything. Per-feed overridable.
     feed_backfill_days: int = 7
+
+    # Newsletter ingestion (SPEC §9): per-user IMAP accounts polled for
+    # newsletters; each sender becomes a mail feed, each extracted link an article.
+    mail_poll_minutes: int = 15  # how often the scheduler polls all accounts
+    mail_max_messages_per_poll: int = 20  # cap per account per poll (oldest first)
+    # One LLM call per newsletter maps each link to its human-written intro;
+    # when off, a code heuristic (enclosing block text) is used instead.
+    newsletter_llm_extract: bool = True
+    # One LLM call per newsletter FIRST deletes the non-news chrome (intro,
+    # socials/footer, sponsor credits, platform self-links) from the full email
+    # rendered with placeholder link tokens; the extract call then only sees the
+    # surviving news links. Far more reliable than one-pass triage.
+    newsletter_llm_clean: bool = True
 
     # GUI: source favicon proxy cache (hours)
     favicon_cache_hours: int = 168

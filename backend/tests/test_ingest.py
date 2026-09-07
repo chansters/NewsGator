@@ -144,13 +144,22 @@ async def test_poll_extracts_article_image(
     <img src="https://img.example.com/emoji/1f600.png" />
     <img src="/relative/d.jpg" />]]></description>
 </item>
+<item>
+  <title>Lazy-loaded image (placeholder src, real URL in data-src)</title>
+  <link>https://news.example.com/i7</link>
+  <guid>img-7</guid>
+  <content:encoded><![CDATA[<p><img
+    src="https://news.example.com/themes/x/images/placeholder.svg"
+    data-src="https://img.example.com/lazy.jpg"
+    class="lazy" alt="lead" /></p>]]></content:encoded>
+</item>
 </channel></rss>
 """
     monkeypatch.setattr(ingest, "_http_get", _ok_http(rss))
     feed = await _make_feed(db_session, fetch_fulltext=False)
 
     async with db_session() as s:
-        assert await ingest.poll_feed(s, await s.get(Feed, feed.id)) == 6
+        assert await ingest.poll_feed(s, await s.get(Feed, feed.id)) == 7
         by_guid = {
             a.guid: a.image_url
             for a in (await s.scalars(select(Article))).all()
@@ -162,6 +171,9 @@ async def test_poll_extracts_article_image(
     assert by_guid["img-5"] == "https://img.example.com/inline.jpg"
     # tracking pixel + emoji skipped; relative src resolved against the link
     assert by_guid["img-6"] == "https://news.example.com/relative/d.jpg"
+    # lazy-load placeholder src is not a real image → None, so the fulltext
+    # stage can recover the page's og:image instead of storing the placeholder
+    assert by_guid["img-7"] is None
 
 
 async def test_poll_cross_feed_url_dedupe(db_session, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -386,6 +398,30 @@ async def _run_fulltext(s: AsyncSession, feed: Feed, article: Article) -> None:
     await fulltext.fetch_full_text(s, a, f)
 
 
+def test_extract_text_strips_xml_invalid_chars(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Newsletter-linked pages can carry NULL bytes / C0 control chars; they are
+    # invalid XML and crash readability's lxml cleaner ("All strings must be
+    # XML compatible"). They must be stripped before the readability fallback.
+    import trafilatura
+
+    para = "Long newsletter paragraph with plenty of readable prose. " * 10
+    dirty = (
+        f"<html><body><article><p>{para}\x00\x07</p><p>{para}</p></article></body></html>"
+    )
+    calls = 0
+
+    def flaky_extract(html: str, *args: object, **kwargs: object) -> str | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None  # force the readability fallback
+        return "readable fallback text"
+
+    monkeypatch.setattr(trafilatura, "extract", flaky_extract)
+    text = fulltext._extract_text(dirty)
+    assert text == "readable fallback text"
+
+
 async def test_fulltext_direct_success(db_session, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_extract(monkeypatch, LONG_TEXT)
     _patch_pages(monkeypatch, {"https://news.example.com": "<html>full</html>"})
@@ -508,6 +544,139 @@ async def test_fulltext_keeps_feed_image(db_session, monkeypatch: pytest.MonkeyP
         a = await s.get(Article, article.id)
         assert a is not None
         assert a.image_url == "https://img.example.com/from-feed.jpg"
+
+
+# --- page publication-date recovery (mail feeds) ---
+
+DATED_HTML = (
+    '<html><head><meta property="article:published_time" content="2026-08-20T10:30:00Z">'
+    "</head><body>article</body></html>"
+)
+
+
+async def test_fulltext_recovers_page_date_for_mail_feed(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mail articles start with the email Date: header (delivery time); the
+    linked page's real publication date replaces it during full-text fetch."""
+    _patch_extract(monkeypatch, LONG_TEXT)
+    _patch_pages(monkeypatch, {"https://news.example.com": DATED_HTML})
+    feed, article = await _article(db_session, kind="mail", sender_email="news@example.com")
+    email_date = datetime.now(UTC) - timedelta(hours=2)
+
+    async with db_session() as s:
+        a = await s.get(Article, article.id)
+        assert a is not None
+        a.published_at = email_date
+        await s.commit()
+        await _run_fulltext(s, feed, article)
+        a = await s.get(Article, article.id)
+        assert a is not None
+        assert a.published_at is not None
+        assert a.published_at.date().isoformat() == "2026-08-20"
+        detail = await s.scalar(
+            select(ActivityEvent.detail).where(ActivityEvent.action == "fulltext_fetch")
+        )
+        assert detail is not None and '"date_recovered": true' in detail
+
+
+async def test_fulltext_keeps_feedparser_date_for_rss(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RSS entries keep the feedparser date — page metadata never overrides it."""
+    _patch_extract(monkeypatch, LONG_TEXT)
+    _patch_pages(monkeypatch, {"https://news.example.com": DATED_HTML})
+    feed, article = await _article(db_session)  # kind="rss"
+    feed_date = datetime.now(UTC) - timedelta(hours=2)
+
+    async with db_session() as s:
+        a = await s.get(Article, article.id)
+        assert a is not None
+        a.published_at = feed_date
+        await s.commit()
+        await _run_fulltext(s, feed, article)
+        a = await s.get(Article, article.id)
+        assert a is not None
+        assert a.published_at == feed_date
+        detail = await s.scalar(
+            select(ActivityEvent.detail).where(ActivityEvent.action == "fulltext_fetch")
+        )
+        assert detail is not None and '"date_recovered": false' in detail
+
+
+def test_explicit_page_date_parsing() -> None:
+    """Strict extractor: explicit metadata only — og/article meta + JSON-LD."""
+    og = (
+        '<html><head><meta property="article:published_time" '
+        'content="2026-08-20T10:30:00Z"></head></html>'
+    )
+    assert fulltext._explicit_page_date(og) == datetime(2026, 8, 20, 10, 30, tzinfo=UTC)
+    # attribute order reversed (content before property)
+    rev = '<html><head><meta content="2026-08-21" name="date"></head></html>'
+    assert fulltext._explicit_page_date(rev) == datetime(2026, 8, 21, tzinfo=UTC)
+    # JSON-LD (and @graph nesting)
+    ld = (
+        '<html><head><script type="application/ld+json">'
+        '{"@context":"https://schema.org","@graph":[{"@type":"NewsArticle",'
+        '"datePublished":"2026-08-22T08:00:00+02:00"}]}'
+        "</script></head></html>"
+    )
+    assert fulltext._explicit_page_date(ld) == datetime(2026, 8, 22, 6, 0, tzinfo=UTC)
+
+
+def test_explicit_page_date_rejects_guesses() -> None:
+    """In doubt → no date: URL slugs, copyright years, bare text dates and
+    bogus/future values are all ignored (the email date stays)."""
+    assert fulltext._explicit_page_date("<html><body>nothing</body></html>") is None
+    # trafilatura would guess 2026-01-01 from this copyright line — we must not
+    assert (
+        fulltext._explicit_page_date("<html><body><footer>© 2026 ACME</footer></body></html>")
+        is None
+    )
+    # URL-looking date in an href is not metadata either
+    assert (
+        fulltext._explicit_page_date(
+            '<html><body><a href="https://x.example/2023/11/03/post">old</a></body></html>'
+        )
+        is None
+    )
+    # garbage + future dates are rejected
+    garbage = (
+        '<html><head><meta property="article:published_time" '
+        'content="not-a-date"></head></html>'
+    )
+    assert fulltext._explicit_page_date(garbage) is None
+    future = (datetime.now(UTC) + timedelta(days=30)).isoformat()
+    assert (
+        fulltext._explicit_page_date(
+            f'<html><head><meta property="article:published_time" content="{future}"></head></html>'
+        )
+        is None
+    )
+
+
+async def test_fulltext_keeps_email_date_without_explicit_metadata(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Page has no explicit date metadata → the email Date: header stays."""
+    _patch_extract(monkeypatch, LONG_TEXT)
+    _patch_pages(monkeypatch, {"https://news.example.com": "<html><body>plain</body></html>"})
+    feed, article = await _article(db_session, kind="mail", sender_email="news@example.com")
+    email_date = datetime.now(UTC) - timedelta(hours=2)
+
+    async with db_session() as s:
+        a = await s.get(Article, article.id)
+        assert a is not None
+        a.published_at = email_date
+        await s.commit()
+        await _run_fulltext(s, feed, article)
+        a = await s.get(Article, article.id)
+        assert a is not None
+        assert a.published_at == email_date
+        detail = await s.scalar(
+            select(ActivityEvent.detail).where(ActivityEvent.action == "fulltext_fetch")
+        )
+        assert detail is not None and '"date_recovered": false' in detail
 
 
 async def test_reprocess_article_endpoint(

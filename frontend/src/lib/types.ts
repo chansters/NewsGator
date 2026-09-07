@@ -83,9 +83,40 @@ export interface PipelineRow {
   story_id: number | null;
 }
 
+// Live LLM interaction trace (in-memory on the backend; SSE 'llm_interaction').
+export interface LLMInteraction {
+  id: number;
+  ts: string;
+  kind: string;
+  label: string | null;
+  article_id: number | null;
+  endpoint: 'chat' | 'embed';
+  model: string;
+  status: 'running' | 'done' | 'error';
+  request: {
+    system?: string;
+    user?: string;
+    system_chars?: number;
+    user_chars?: number;
+    truncated?: boolean;
+    texts?: number;
+    chars?: number;
+    sample?: string;
+  };
+  response: string | null;
+  response_chars?: number;
+  error: string | null;
+  latency_ms: number | null;
+  usage: { total_tokens?: number | null } | null;
+  attempts: number;
+}
+
 export interface Feed {
   id: number;
   url: string;
+  // 'rss' or 'mail' (newsletter ingestion; never RSS-polled)
+  kind: 'rss' | 'mail';
+  sender_email: string | null;
   title: string;
   is_enabled: boolean;
   poll_interval_min: number;
@@ -94,6 +125,35 @@ export interface Feed {
   last_error: string | null;
   consecutive_failures: number;
   fetch_fulltext: boolean;
+  // populated by GET /feeds (unread is per requesting user) — 0 elsewhere
+  story_count: number;
+  unread_story_count: number;
+}
+
+/** Story-list feed filter option (GET /api/stories/feed-options) — a feed
+ * that has at least one article in a story. Available to all users. */
+export interface FeedOption {
+  id: number;
+  title: string;
+  kind: 'rss' | 'mail';
+  url: string;
+  sender_email: string | null;
+}
+
+/** Per-user IMAP account for newsletter ingestion (GET /api/mail-accounts).
+ * The password is write-only and never returned. */
+export interface MailAccount {
+  id: number;
+  host: string;
+  port: number;
+  username: string;
+  folder: string;
+  use_ssl: boolean;
+  is_enabled: boolean;
+  last_uid: number;
+  last_checked_at: string | null;
+  last_error: string | null;
+  created_at: string;
 }
 
 export interface Category {

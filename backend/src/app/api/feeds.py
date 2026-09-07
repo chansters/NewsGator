@@ -17,6 +17,7 @@ from app.models import (
     Story,
     StoryRevision,
     StoryState,
+    User,
 )
 from app.services import activity
 from app.services.ingest import parse_opml, poll_feed, poll_feeds_background
@@ -34,9 +35,37 @@ def _fetch_feed_title(url: str) -> str:
 
 
 @router.get("")
-async def list_feeds(session: AsyncSession = Depends(get_session)) -> list[FeedOut]:
-    rows = await session.scalars(select(Feed).order_by(Feed.id))
-    return [FeedOut.model_validate(f) for f in rows]
+async def list_feeds(
+    user: User = Depends(admin_user), session: AsyncSession = Depends(get_session)
+) -> list[FeedOut]:
+    feeds = (await session.scalars(select(Feed).order_by(Feed.id))).all()
+    # feed_id → story ids with at least one source article from that feed
+    links: dict[int, set[int]] = {}
+    for feed_id, story_id in (
+        await session.execute(
+            select(Article.feed_id, Article.story_id).where(Article.story_id.is_not(None))
+        )
+    ).all():
+        if story_id is not None:
+            links.setdefault(feed_id, set()).add(story_id)
+    read_ids = {
+        s.story_id
+        for s in (
+            await session.scalars(
+                select(StoryState).where(
+                    StoryState.user_id == user.id, StoryState.is_read.is_(True)
+                )
+            )
+        ).all()
+    }
+    out: list[FeedOut] = []
+    for feed in feeds:
+        story_ids = links.get(feed.id, set())
+        item = FeedOut.model_validate(feed)
+        item.story_count = len(story_ids)
+        item.unread_story_count = len(story_ids - read_ids)
+        out.append(item)
+    return out
 
 
 class RefreshResult(BaseModel):
@@ -45,8 +74,13 @@ class RefreshResult(BaseModel):
 
 @router.post("/refresh")
 async def refresh_all(session: AsyncSession = Depends(get_session)) -> dict[str, int]:
-    """Force-poll every enabled feed now (ignores the adaptive schedule)."""
-    feeds = (await session.scalars(select(Feed).where(Feed.is_enabled))).all()
+    """Force-poll every enabled RSS feed now (ignores the adaptive schedule).
+
+    Mail feeds are driven by the IMAP poll, never fetched over HTTP.
+    """
+    feeds = (
+        await session.scalars(select(Feed).where(Feed.is_enabled, Feed.kind == "rss"))
+    ).all()
     total = 0
     for feed in feeds:
         total += await poll_feed(session, feed)
@@ -63,6 +97,11 @@ async def refresh_feed(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Feed not found")
     if not feed.is_enabled:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Feed is disabled")
+    if feed.kind != "rss":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Newsletter feeds are refreshed by polling the mail account (Settings)",
+        )
     return RefreshResult(new_articles=await poll_feed(session, feed))
 
 

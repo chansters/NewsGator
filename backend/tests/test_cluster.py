@@ -414,6 +414,72 @@ async def test_stories_list_and_read_state(client: AsyncClient, db_session) -> N
     assert story_id in ids
 
 
+async def test_stories_feed_filter_and_options(client: AsyncClient, db_session) -> None:
+    """?feed=N keeps only stories with a source from that feed; /feed-options
+    lists exactly the feeds that have stories."""
+    await setup_admin(client)
+    async with db_session() as s:
+        s.add_all([Category(name=n) for n in SEED_CATEGORIES])
+        f1 = Feed(url="https://one.example.com/rss", title="One")
+        f2 = Feed(url="https://two.example.com/rss", title="Two")
+        f3 = Feed(url="https://lonely.example.com/rss", title="Lonely")
+        s.add_all([f1, f2, f3])
+        await s.flush()
+        s1 = Story(title="Only feed 1", summary="")
+        s2 = Story(title="Feeds 1+2", summary="")
+        s.add_all([s1, s2])
+        await s.flush()
+
+        def art(feed: Feed, story: Story, guid: str) -> Article:
+            return Article(
+                feed_id=feed.id, guid=guid, url=f"https://news.example.com/{guid}",
+                title=guid, story_id=story.id, processing_state="clustered",
+            )
+
+        s.add(art(f1, s1, "a1"))
+        s.add(art(f1, s2, "a2"))
+        s.add(art(f2, s2, "a3"))
+        # feed 3 has an article but not in any story → not a filter option
+        s.add(
+            Article(
+                feed_id=f3.id, guid="a4", url="https://news.example.com/a4",
+                title="a4", processing_state="fetched",
+            )
+        )
+        await s.commit()
+        ids = {}
+        for t in ("Only feed 1", "Feeds 1+2"):
+            story = await s.scalar(select(Story).where(Story.title == t))
+            assert story is not None
+            ids[t] = story.id
+        feed_ids = {"one": f1.id, "two": f2.id, "lonely": f3.id}
+
+    assert ids["Only feed 1"] != ids["Feeds 1+2"]
+    got = [i["id"] for i in (await client.get(f"/api/stories?feed={feed_ids['one']}")).json()]
+    assert sorted(got) == sorted([ids["Only feed 1"], ids["Feeds 1+2"]])
+    got = [i["id"] for i in (await client.get(f"/api/stories?feed={feed_ids['two']}")).json()]
+    assert got == [ids["Feeds 1+2"]]
+    got = [i["id"] for i in (await client.get(f"/api/stories?feed={feed_ids['lonely']}")).json()]
+    assert got == []
+
+    r = await client.get("/api/stories/feed-options")
+    assert r.status_code == 200
+    options = {o["id"]: o for o in r.json()}
+    assert set(options) == {feed_ids["one"], feed_ids["two"]}  # no lonely feed
+    assert options[feed_ids["one"]]["title"] == "One"
+    assert options[feed_ids["one"]]["kind"] == "rss"
+
+    # any authenticated user may filter (feeds CRUD is admin-only)
+    r = await client.post("/api/users", json={"username": "reader", "password": "readerpass"})
+    assert r.status_code == 201
+    await client.post("/api/auth/logout")
+    r = await client.post("/api/auth/login", json={"username": "reader", "password": "readerpass"})
+    assert r.status_code == 200
+    assert (await client.get("/api/stories/feed-options")).status_code == 200
+    got = [i["id"] for i in (await client.get(f"/api/stories?feed={feed_ids['two']}")).json()]
+    assert got == [ids["Feeds 1+2"]]
+
+
 async def test_stories_list_sort(client: AsyncClient, db_session) -> None:
     from datetime import UTC, datetime, timedelta
 

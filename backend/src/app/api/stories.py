@@ -136,6 +136,8 @@ def _source_hosts(rows: Iterable[tuple[int | None, str]]) -> dict[int, list[str]
 async def list_stories(
     filter: str = Query(default="all", pattern="^(all|unread|updated)$"),
     category: str | None = None,
+    # only stories having at least one source article from this feed
+    feed: int | None = None,
     sort: str = Query(default="published", pattern="^(updated|published|sources)$"),
     order: str = Query(default="asc", pattern="^(asc|desc)$"),
     user: User = Depends(current_user),
@@ -149,6 +151,20 @@ async def list_stories(
             )
         )
     ).all()
+    # story ids reachable from the selected feed (None = no feed filter)
+    feed_story_ids: set[int] | None = None
+    if feed is not None:
+        feed_story_ids = {
+            story_id
+            for story_id in (
+                await session.scalars(
+                    select(Article.story_id).where(
+                        Article.feed_id == feed, Article.story_id.is_not(None)
+                    )
+                )
+            ).all()
+            if story_id is not None
+        }
     states = {
         s.story_id: s
         for s in (
@@ -190,6 +206,8 @@ async def list_stories(
             continue
         if category and story.category != category:
             continue
+        if feed_story_ids is not None and story.id not in feed_story_ids:
+            continue
         source_count, published_at = stats.get(story.id, (0, None))
         out.append(
             StoryListItem(
@@ -218,6 +236,39 @@ async def list_stories(
     elif sort == "sources":
         out.sort(key=lambda s: (s.source_count, s.last_updated_at), reverse=reverse)
     return out
+
+
+class FeedOption(BaseModel):
+    """A feed with at least one article in a story — story-list filter options."""
+
+    id: int
+    title: str
+    kind: str
+    url: str
+    sender_email: str | None
+
+
+# Declared before /{story_id} so the literal path wins over the int param.
+@router.get("/feed-options")
+async def feed_options(
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[FeedOption]:
+    """Feeds usable in the story-list feed filter. Any authenticated user —
+    the feeds CRUD router itself is admin-only, but every user can filter."""
+    rows = (
+        await session.execute(
+            select(Feed.id, Feed.title, Feed.kind, Feed.url, Feed.sender_email)
+            .join(Article, Article.feed_id == Feed.id)
+            .where(Article.story_id.is_not(None))
+            .group_by(Feed.id)
+            .order_by(Feed.title)
+        )
+    ).all()
+    return [
+        FeedOption(id=fid, title=title, kind=kind, url=url, sender_email=sender)
+        for fid, title, kind, url, sender in rows
+    ]
 
 
 class ShareLanguage(BaseModel):

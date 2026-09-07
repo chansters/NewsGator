@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { api, getToken } from '$lib/api';
   import { currentUser } from '$lib/stores';
-  import type { Category, ManagedUser } from '$lib/types';
+  import type { Category, MailAccount, ManagedUser } from '$lib/types';
 
   let language = $state('');
   let saved = $state(false);
@@ -42,6 +42,137 @@
   let feedUnread = $state(false);
   let feedCopied = $state(false);
   let feedCategories = $state<string[]>([]);
+
+  // Newsletter inboxes (IMAP): per-user accounts polled for newsletters.
+  // The password is write-only — re-enter it only to change it.
+  let mailAccounts = $state<MailAccount[]>([]);
+  let mailHost = $state('');
+  let mailPort = $state(993);
+  let mailUsername = $state('');
+  let mailPassword = $state('');
+  let mailFolder = $state('');
+  let mailSsl = $state(true);
+  let mailError = $state('');
+  let mailAdding = $state(false);
+  let mailTest = $state<Record<number, { ok: boolean; errors: string[]; folder: string | null }>>({});
+  let mailPolling = $state<number | null>(null);
+  // Immediate feedback after "Poll now": messages found, processing is backgrounded
+  let mailPollInfo = $state<Record<number, string>>({});
+  // Inline edit: id of the account being edited + draft values.
+  // editPassword stays blank unless the user wants to REPLACE the stored one.
+  let mailEditingId = $state<number | null>(null);
+  let editHost = $state('');
+  let editPort = $state(993);
+  let editUsername = $state('');
+  let editPassword = $state('');
+  let editFolder = $state('');
+  let editSsl = $state(true);
+  let mailSaving = $state(false);
+
+  function startEditMail(a: MailAccount) {
+    mailError = '';
+    mailEditingId = a.id;
+    editHost = a.host;
+    editPort = a.port;
+    editUsername = a.username;
+    editPassword = '';
+    editFolder = a.folder;
+    editSsl = a.use_ssl;
+  }
+
+  async function saveMailAccount(e: SubmitEvent) {
+    e.preventDefault();
+    if (mailEditingId === null) return;
+    mailError = '';
+    mailSaving = true;
+    try {
+      await api.mailAccounts.update(mailEditingId, {
+        host: editHost,
+        port: editPort,
+        username: editUsername,
+        folder: editFolder,
+        use_ssl: editSsl,
+        // blank = keep the stored password (it is never readable back)
+        ...(editPassword ? { password: editPassword } : {})
+      });
+      mailEditingId = null;
+      mailAccounts = await api.mailAccounts.list();
+    } catch (err) {
+      mailError = err instanceof Error ? err.message : 'Failed to save account';
+    } finally {
+      mailSaving = false;
+    }
+  }
+
+  async function addMailAccount(e: SubmitEvent) {
+    e.preventDefault();
+    mailError = '';
+    mailAdding = true;
+    try {
+      await api.mailAccounts.create({
+        host: mailHost,
+        port: mailPort,
+        username: mailUsername,
+        password: mailPassword,
+        folder: mailFolder,
+        use_ssl: mailSsl
+      });
+      mailHost = '';
+      mailUsername = '';
+      mailPassword = '';
+      mailFolder = '';
+      mailAccounts = await api.mailAccounts.list();
+    } catch (err) {
+      mailError = err instanceof Error ? err.message : 'Failed to add account';
+    } finally {
+      mailAdding = false;
+    }
+  }
+
+  async function testMailAccount(a: MailAccount) {
+    mailTest = { ...mailTest, [a.id]: await api.mailAccounts.test(a.id) };
+  }
+
+  async function pollMailAccount(a: MailAccount) {
+    mailPolling = a.id;
+    try {
+      const r = await api.mailAccounts.poll(a.id);
+      mailPollInfo = {
+        ...mailPollInfo,
+        [a.id]:
+          r.found === 0
+            ? 'No new messages.'
+            : `${r.found} message${r.found === 1 ? '' : 's'} found — processing now, watch the Activity page.`
+      };
+    } catch (err) {
+      mailError = err instanceof Error ? err.message : 'Poll failed';
+    } finally {
+      mailPolling = null;
+      mailAccounts = await api.mailAccounts.list();
+    }
+  }
+
+  async function toggleMailAccount(a: MailAccount) {
+    await api.mailAccounts.update(a.id, { is_enabled: !a.is_enabled });
+    mailAccounts = await api.mailAccounts.list();
+  }
+
+  async function removeMailAccount(a: MailAccount) {
+    if (!confirm(`Remove ${a.username}@${a.host}? Newsletter feeds already created are kept.`))
+      return;
+    mailError = '';
+    try {
+      await api.mailAccounts.remove(a.id);
+      mailAccounts = await api.mailAccounts.list();
+    } catch (err) {
+      mailError = err instanceof Error ? err.message : 'Failed to remove account';
+    }
+  }
+
+  function fmtMailChecked(d: string | null) {
+    return d ? new Date(d).toLocaleString() : 'never';
+  }
+
   const feedUrl = $derived.by(() => {
     if (typeof window === 'undefined' || !feedToken) return '';
     const params = new URLSearchParams({ token: feedToken });
@@ -77,7 +208,9 @@
         { key: 'llm_model', label: 'LLM model' },
         { key: 'llm_api_key', label: 'LLM API key', secret: true },
         { key: 'embed_base_url', label: 'Embeddings base URL (empty = same as LLM)' },
-        { key: 'embed_model', label: 'Embedding model' }
+        { key: 'embed_model', label: 'Embedding model' },
+        { key: 'llm_trace_enabled', label: 'Live LLM trace on Activity page (1 = on, 0 = off)' },
+        { key: 'llm_trace_max_chars', label: 'Trace max chars per message' }
       ]
     },
     {
@@ -133,6 +266,7 @@
 
   onMount(async () => {
     language = $currentUser?.summary_language ?? '';
+    mailAccounts = await api.mailAccounts.list();
     // Token for the RSS URL: prefer a fresh one from the backend (works when
     // localStorage lost it), fall back to whatever is already stored.
     try {
@@ -315,6 +449,105 @@
     <input readonly value={feedUrl} onfocus={(e) => e.currentTarget.select()} />
     <button onclick={copyFeedUrl}>{feedCopied ? 'Copied ✓' : 'Copy'}</button>
   </div>
+</div>
+
+<div class="card">
+  <h2>Newsletter inboxes (IMAP)</h2>
+  <p class="hint">
+    Point at an IMAP folder that receives newsletters. The folder is polled
+    regularly; every sender becomes a feed (visible on the Feeds page) and every
+    article link found in a message is processed like an RSS entry. Messages are
+    never marked as read. The password is stored on the server and never shown again.
+  </p>
+  {#if mailError}<p class="bad">{mailError}</p>{/if}
+  <form class="add" onsubmit={addMailAccount}>
+    <input bind:value={mailHost} placeholder="imap.example.com" required />
+    <input
+      bind:value={mailPort}
+      type="number"
+      min="1"
+      max="65535"
+      style="max-width: 6rem"
+      title="Port"
+    />
+    <input bind:value={mailUsername} placeholder="you@example.com" required />
+    <input
+      bind:value={mailPassword}
+      type="password"
+      placeholder="password / app password"
+      required
+    />
+    <input bind:value={mailFolder} placeholder="Folder (e.g. Newsletters)" required />
+    <label class="inline">
+      <input type="checkbox" bind:checked={mailSsl} /> SSL
+    </label>
+    <button type="submit" disabled={mailAdding}>{mailAdding ? 'Adding…' : 'Add inbox'}</button>
+  </form>
+  {#each mailAccounts as a (a.id)}
+    <div class="mailacct">
+      {#if mailEditingId === a.id}
+        <form class="add" onsubmit={saveMailAccount}>
+          <input bind:value={editHost} placeholder="imap.example.com" required />
+          <input
+            bind:value={editPort}
+            type="number"
+            min="1"
+            max="65535"
+            style="max-width: 6rem"
+            title="Port"
+          />
+          <input bind:value={editUsername} placeholder="you@example.com" required />
+          <input
+            bind:value={editPassword}
+            type="password"
+            placeholder="new password (blank = keep current)"
+          />
+          <input bind:value={editFolder} placeholder="Folder (e.g. Newsletters)" required />
+          <label class="inline">
+            <input type="checkbox" bind:checked={editSsl} /> SSL
+          </label>
+          <button type="submit" disabled={mailSaving}>{mailSaving ? 'Saving…' : 'Save'}</button>
+          <button type="button" onclick={() => (mailEditingId = null)}>Cancel</button>
+        </form>
+      {:else}
+        <div class="row">
+          <strong>{a.username}@{a.host}:{a.port}</strong>
+          <span class="ovr">{a.folder}</span>
+          <span class="ovr" class:env={a.is_enabled}>{a.is_enabled ? 'enabled' : 'disabled'}</span>
+          <span class="actions">
+            <button class="linkbtn" onclick={() => startEditMail(a)}>Edit</button>
+            <button class="linkbtn" onclick={() => testMailAccount(a)}>Test</button>
+            <button
+              class="linkbtn"
+              onclick={() => pollMailAccount(a)}
+              disabled={!a.is_enabled || mailPolling === a.id}
+            >
+              {mailPolling === a.id ? 'Polling…' : 'Poll now'}
+            </button>
+            <button class="linkbtn" onclick={() => toggleMailAccount(a)}>
+              {a.is_enabled ? 'Disable' : 'Enable'}
+            </button>
+            <button class="linkbtn" onclick={() => removeMailAccount(a)}>Delete</button>
+          </span>
+        </div>
+      {/if}
+      <p class="hint">
+        last checked: {fmtMailChecked(a.last_checked_at)} · watermark UID {a.last_uid}
+        {#if !a.use_ssl}· no SSL{/if}
+      </p>
+      {#if a.last_error}<p class="bad">Last error: {a.last_error}</p>{/if}
+      {#if mailPollInfo[a.id]}<p class="ok">{mailPollInfo[a.id]}</p>{/if}
+      {#if mailTest[a.id]}
+        <p class={mailTest[a.id].ok ? 'ok' : 'bad'}>
+          {mailTest[a.id].ok
+            ? `Connection OK — folder "${mailTest[a.id].folder}" reachable`
+            : mailTest[a.id].errors.join(', ')}
+        </p>
+      {/if}
+    </div>
+  {:else}
+    <p class="hint">No inbox configured yet.</p>
+  {/each}
 </div>
 
 {#if $currentUser?.is_admin}
@@ -528,6 +761,9 @@
   .bad { color: var(--error); }
   .hint { color: var(--frozen-text); font-size: 0.9em; }
   .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .mailacct { border-top: 1px solid var(--table-border); padding-top: 0.5rem; margin-top: 0.5rem; }
+  .mailacct .row { margin-top: 0; }
+  .mailacct p { margin: 0.25rem 0 0; }
   table { border-collapse: collapse; margin-top: 0.5rem; }
   td, th { border: 1px solid var(--table-border); padding: 0.25rem 0.8rem; text-align: right; }
   tr.best td { background: var(--ok-bg); font-weight: 600; }

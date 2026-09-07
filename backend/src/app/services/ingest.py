@@ -130,12 +130,18 @@ def _entry_image(entry: feedparser.FeedParserDict) -> str | None:
 
 _IMG_SRC_RE = re.compile(r"<img\b[^>]*?src=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
 _PIXEL_RE = re.compile(r"\b(?:width|height)\s*=\s*[\"']?1(?:px)?[\"']?[\s>]", re.IGNORECASE)
+_PLACEHOLDER_RE = re.compile(
+    r"/(?:placeholder|spacer|blank|transparent)[^/]*\.(?:svg|gif|png)$", re.IGNORECASE
+)
 
 
 def _inline_image(entry: feedparser.FeedParserDict) -> str | None:
     """First real <img src> in the entry's HTML content/summary.
 
-    Skips data: URIs, 1x1 tracking pixels, and emoji/smiley sprites.
+    Skips data: URIs, 1x1 tracking pixels, emoji/smiley sprites, and lazy-load
+    placeholders (e.g. PlayStation Blog ships src="placeholder.svg" with the
+    real URL in data-src — which feedparser's sanitizer strips — so the entry
+    counts as image-less and fulltext's og:image recovery takes over).
     """
     html = ""
     if entry.get("content"):
@@ -147,6 +153,8 @@ def _inline_image(entry: feedparser.FeedParserDict) -> str | None:
         if src.startswith(("data:", "//feedsportal.com", "//feedburner.com")):
             continue
         if _PIXEL_RE.search(tag) or "emoji" in src or "smiley" in src:
+            continue
+        if _PLACEHOLDER_RE.search(src):
             continue
         if src.startswith("//"):
             return "https:" + src

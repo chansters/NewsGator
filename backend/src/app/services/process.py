@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_session
 from app.models import Article, Category
-from app.services import activity, llm_client, prompts, usage
+from app.services import activity, llm_client, llmtrace, prompts, usage
 from app.services.vectorstore import get_vector_store
 
 _queue: asyncio.Queue[int] = asyncio.Queue()
@@ -122,7 +122,8 @@ async def summarize_article(session: AsyncSession, article: Article) -> bool:
     await activity.emit(session, "llm", "summarize_start", {"article_id": article.id})
     try:
         system, user = prompts.summarize_article(article.title, text, list(taxonomy))
-        result, latency_ms = await llm_client.chat_json(system, user)
+        with llmtrace.context("summarize", label=article.title, article_id=article.id):
+            result, latency_ms = await llm_client.chat_json(system, user)
     except llm_client.LLMError as exc:
         await activity.emit(
             session,
@@ -166,7 +167,8 @@ async def embed_article(session: AsyncSession, article: Article) -> None:
         return
     text = f"{article.title}\n\n{article.summary}"
     start = time.monotonic()
-    vectors = await llm_client.embed([text])
+    with llmtrace.context("embed", label=article.title, article_id=article.id):
+        vectors = await llm_client.embed([text])
     latency_ms = int((time.monotonic() - start) * 1000)
     usage.record(
         session,

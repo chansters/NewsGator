@@ -7,6 +7,7 @@ GUI appends the session token when it has one.
 
 import re
 import time
+from urllib.parse import urljoin
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,22 +20,89 @@ from app.models import User
 router = APIRouter(prefix="/favicon", tags=["favicon"])
 
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$", re.IGNORECASE)
+_LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+_REL_RE = re.compile(r'rel=["\']([^"\']+)["\']', re.IGNORECASE)
+_HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
 _MAX_BYTES = 256 * 1024
+_MAX_HTML = 512 * 1024
 _FAILURE_TTL_S = 3600  # don't re-hit a broken/slow site on every page load
+
+# Bot-protection (Cloudflare & co.) 403s the default python-httpx UA even on
+# /favicon.ico (arstechnica, phoronix, …) — present as a plain browser.
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,image/avif,image/webp,image/*,*/*;q=0.8",
+}
 
 # host -> (expires_at, content or None on failure, media type)
 _cache: dict[str, tuple[float, bytes | None, str]] = {}
 
 
-async def _fetch_favicon(host: str) -> tuple[bytes, str]:
-    """Fetch https://<host>/favicon.ico. Module-level seam for tests."""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=5.0) as client:
-        resp = await client.get(f"https://{host}/favicon.ico")
+def _icon_links(html: str) -> list[str]:
+    """Hrefs of <link rel="…icon…"> tags, in document order."""
+    out: list[str] = []
+    for tag in _LINK_RE.findall(html):
+        rel = _REL_RE.search(tag)
+        href = _HREF_RE.search(tag)
+        if rel and href and "icon" in rel.group(1).lower():
+            out.append(href.group(1))
+    return out
+
+
+async def _fetch_host_favicon(host: str) -> tuple[bytes, str]:
+    """Favicon for one exact host: /favicon.ico first, then the homepage's
+    <link rel=icon> (many sites no longer serve the conventional path)."""
+    base = f"https://{host}/"
+    async with httpx.AsyncClient(
+        follow_redirects=True, timeout=5.0, headers=_HEADERS
+    ) as client:
+        try:
+            resp = await client.get(urljoin(base, "favicon.ico"))
+            resp.raise_for_status()
+            if 0 < len(resp.content) <= _MAX_BYTES:
+                media = resp.headers.get("content-type", "image/x-icon").split(";")[0].strip()
+                return resp.content, media
+        except Exception:
+            pass  # fall through to homepage parsing
+        resp = await client.get(base)
         resp.raise_for_status()
-        if len(resp.content) > _MAX_BYTES:
-            raise ValueError("favicon too large")
-        media = resp.headers.get("content-type", "image/x-icon").split(";")[0].strip()
-        return resp.content, media
+        for href in _icon_links(resp.text[:_MAX_HTML]):
+            url = urljoin(base, href)
+            if not url.startswith("https://"):
+                continue
+            try:
+                icon = await client.get(url)
+                icon.raise_for_status()
+            except Exception:
+                continue
+            if 0 < len(icon.content) <= _MAX_BYTES:
+                media = icon.headers.get("content-type", "image/x-icon").split(";")[0].strip()
+                return icon.content, media
+        raise ValueError("no favicon found")
+
+
+async def _fetch_favicon(host: str) -> tuple[bytes, str]:
+    """Best-effort favicon: the exact host, then parent domains.
+
+    Newsletter senders are often subdomains (mail.example.com) that serve no
+    icon of their own — walk up to the registrable-looking parent (stopping at
+    two labels). Module-level seam for tests.
+    """
+    last_exc: Exception = ValueError("no favicon found")
+    candidate = host
+    while True:
+        try:
+            return await _fetch_host_favicon(candidate)
+        except Exception as exc:
+            last_exc = exc
+        labels = candidate.split(".")
+        if len(labels) <= 2:
+            raise last_exc
+        candidate = ".".join(labels[1:])
 
 
 @router.get("")

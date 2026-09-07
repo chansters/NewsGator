@@ -1,18 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { page } from '$app/state';
   import { api, faviconUrl } from '$lib/api';
   import { currentUser } from '$lib/stores';
   import ReadeckIcon from '$lib/components/ReadeckIcon.svelte';
   import ShareButton from '$lib/components/ShareButton.svelte';
-  import type { Category, StoryListItem } from '$lib/types';
+  import type { Category, FeedOption, StoryListItem } from '$lib/types';
 
   type Sort = 'updated' | 'published' | 'sources';
   type Order = 'asc' | 'desc';
 
   let stories = $state<StoryListItem[]>([]);
   let categories = $state<Category[]>([]);
+  let feedOptions = $state<FeedOption[]>([]);
   let filter = $state<'all' | 'unread' | 'updated'>('unread');
   let category = $state('');
+  // 0 = all feeds (transient — not a persisted per-user pref)
+  let feedId = $state(0);
   let sort = $state<Sort>('published');
   let order = $state<Order>('asc');
   let loading = $state(true);
@@ -127,11 +131,19 @@
     if ($currentUser?.story_sort) sort = $currentUser.story_sort;
     if ($currentUser?.story_order) order = $currentUser.story_order;
     if ($currentUser?.story_filter) filter = $currentUser.story_filter;
+    // ?feed=N pre-selects the feed filter (linked from the Feeds page counts)
+    const qFeed = Number(page.url.searchParams.get('feed'));
+    if (qFeed > 0) feedId = qFeed;
     void (async () => {
       try {
         categories = await api.categories.list();
       } catch {
         /* non-admin users may not list categories */
+      }
+      try {
+        feedOptions = await api.stories.feedOptions();
+      } catch {
+        /* filter dropdown simply stays hidden */
       }
       // Optional Readeck feature — the endpoint 404s when not configured.
       try {
@@ -158,7 +170,7 @@
 
   async function load() {
     loading = true;
-    stories = await api.stories.list(filter, category || undefined, sort, order);
+    stories = await api.stories.list(filter, category || undefined, sort, order, feedId || undefined);
     index = 0;
     dx = 0;
     loading = false;
@@ -276,7 +288,11 @@
     // left past the last story lands on the "all caught up" card; right from it comes back
     if (dir === 'left' && atEnd) { dx = 0; return; }
     if (dir === 'right' && index <= 0) { dx = 0; return; }
-    dx = dir === 'left' ? -480 : 480;
+    // fly fully off-screen: a fixed 480px only covers phones — on wide iPad
+    // screens the card must clear the whole viewport (and visibly travel over
+    // the page gutters, not clip at the 960px column edge)
+    const fly = Math.max(window.innerWidth, 480);
+    dx = dir === 'left' ? -fly : fly;
     setTimeout(() => {
       if (dir === 'left' && story && !story.is_read) {
         story.is_read = true;
@@ -328,6 +344,12 @@
       {/each}
     </div>
     <div class="tools">
+      {#if feedOptions.length}
+        <select bind:value={feedId} onchange={load} title="Only stories with a source from this feed">
+          <option value={0}>All feeds</option>
+          {#each feedOptions as f (f.id)}<option value={f.id}>{f.kind === 'mail' ? '✉ ' : ''}{f.title || f.url}</option>{/each}
+        </select>
+      {/if}
       {#if categories.length}
         <select bind:value={category} onchange={load}>
           <option value="">All categories</option>
@@ -617,9 +639,12 @@
   }
   .navbtn:disabled { opacity: 0.4; }
   .deckviewport {
-    /* horizontal pan is handled by the deck; vertical scroll stays native */
+    /* horizontal pan is handled by the deck; vertical scroll stays native.
+       NO overflow clipping here: the flying card must slide OVER the grey
+       page gutters beside the centered 960px column on wide touch screens
+       (iPad), not disappear under them. Horizontal page overflow is clipped
+       at the html level in +layout.svelte instead. */
     touch-action: pan-y;
-    overflow: hidden;
     padding: 0.2rem;
   }
   .deckcard {

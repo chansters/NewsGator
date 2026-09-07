@@ -25,9 +25,10 @@ class QdrantVectorStore:
     async def ensure_collections(self) -> None:
         # Probe the real embedding dimension — a mismatch (e.g. a model that is
         # not 1024-dim bge-m3) makes every upsert fail silently downstream.
-        from app.services import llm_client
+        from app.services import llm_client, llmtrace
 
-        dim = len((await llm_client.embed(["dimension probe"]))[0])
+        with llmtrace.context("probe", label="qdrant dimension probe"):
+            dim = len((await llm_client.embed(["dimension probe"]))[0])
         for name in (ARTICLES, STORIES):
             if await self.client.collection_exists(name):
                 existing = await self.client.get_collection(name)

@@ -92,7 +92,9 @@ erDiagram
 
     FEED {
         int id PK
-        string url
+        string url           "RSS URL, or pseudo-URL newsletter:{sender} for mail feeds"
+        string kind          "rss|mail — mail feeds are never RSS-polled"
+        string sender_email  "mail feeds only: the newsletter From: address"
         string title
         int poll_interval_min
         int backfill_days   "first-poll window; NULL = server default, 0 = all"
@@ -108,12 +110,17 @@ erDiagram
         string url
         string title
         string image_url   "first RSS image: media:content → media:thumbnail → image enclosure
-                            → first real <img> in the entry HTML (skips pixels/emoji);
+                            → first real <img> in the entry HTML (skips pixels/emoji and
+                            lazy-load placeholder srcs like placeholder.svg — the real URL
+                            lives in data-src, which feedparser's sanitizer strips);
                             else og:image recovered from the page during full-text fetch"
-        text   raw_content   "from RSS"
+        text   raw_content   "from RSS (newsletter intro for mail feeds)"
         text   full_text     "fetched from source page (trafilatura)"
         string language      "ISO 639-1, detected"
         text   summary       "per-article, in SUMMARY_LANGUAGE"
+        text   newsletter_intro "mail feeds only: human-written intro from the email;
+                               preferred over the LLM summary when a NEW story is
+                               created from this article"
         string category
         blob   embedding     "float32 (sqlite-vec) or external id (Qdrant)"
         int    story_id FK   "nullable until clustered"
@@ -156,7 +163,7 @@ erDiagram
     LLM_USAGE {
         int id PK
         datetime ts
-        string kind           "summarize|embed|cluster_embed|pairwise|novelty|headline|merge|share_translate|backfill_embed"
+        string kind           "summarize|embed|cluster_embed|pairwise|novelty|headline|merge|share_translate|backfill_embed|newsletter_clean|newsletter_extract"
         string endpoint       "chat|embed"
         string model
         int prompt_tokens     "nullable — from the OpenAI `usage` object"
@@ -169,6 +176,22 @@ erDiagram
         int article_id        "no FK — metrics survive retention"
         int story_id          "no FK"
         int feed_id           "no FK, denormalized at insert for per-source stats"
+    }
+
+    MAIL_ACCOUNT {
+        int id PK
+        int user_id FK        "per-user IMAP inbox (§9 newsletter ingestion)"
+        string host
+        int port              "default 993"
+        string username
+        string password       "write-only via the API; stored in clear like other secrets"
+        string folder         "mandatory — the folder receiving newsletters"
+        bool   use_ssl
+        bool   is_enabled
+        int    last_uid       "IMAP UID watermark — only newer messages are processed"
+        datetime last_checked_at
+        string last_error
+        datetime created_at
     }
 ```
 
@@ -305,14 +328,17 @@ v1 is **data-first, no online learning**:
 | `POST /auth/session-token` | issue a fresh portable token for the authenticated user — for flows that can't use cookies/headers (RSS readers on `/feed.xml`); works even when the client lost its localStorage token mid-session (valid cookie suffices) |
 | `GET/PATCH /me` | profile + per-user preferences: summary language, story-list filter (`story_filter`, default `unread`) and ordering (`story_sort`/`story_order`) — shared across the user's devices |
 | `GET /users`, `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` | user management (admin): list, create (username/password/admin flag), reset password or toggle admin, delete. First-run `/auth/setup` only creates the initial admin; additional users come from here. Guards: the last admin can be neither demoted nor deleted, and a user cannot delete themselves; deleting a user bulk-removes their `STORY_STATE` rows |
-| `GET /stories?filter=all\|unread\|updated&category=&sort=updated\|published\|sources&order=asc\|desc` | story list with **per-user** flags; sort by article publication date (default), last update, or source count, ascending (default: oldest first) or descending; unknown dates always last |
+| `GET /stories?filter=all\|unread\|updated&category=&feed=&sort=updated\|published\|sources&order=asc\|desc` | story list with **per-user** flags; `feed` keeps only stories with at least one source article from that feed; sort by article publication date (default), last update, or source count, ascending (default: oldest first) or descending; unknown dates always last |
+| `GET /stories/feed-options` | feeds that have at least one article in a story (`[{id, title, kind, url, sender_email}]`) — options for the story-list feed filter. Any authenticated user (feeds CRUD itself is admin-only) |
 | `GET /stories/{id}` | story detail: merged summary + source articles + revision history |
 | `POST /stories/{id}/read` | sets `read_at_version = story.version` (per user) |
 | `POST /stories/{id}/unread` | |
 | `GET /stories/{id}/diff?from={version}` | what changed |
-| `CRUD /feeds` | feed management (admin); **creating a feed kicks an immediate background poll** (no waiting for the next scheduler tick) |
+| `CRUD /feeds` | feed management (admin); `GET /feeds` also reports `story_count` / `unread_story_count` per feed (stories with a source from it; unread is per the requesting user). **Creating a feed kicks an immediate background poll** (no waiting for the next scheduler tick) |
 | `POST /feeds/import-opml` | bulk-import feeds from an OPML subscription export (admin); added feeds are polled immediately in the background |
-| `POST /feeds/{id}/refresh`, `POST /feeds/refresh` | force-poll one/all feeds now, bypassing the adaptive schedule (admin) |
+| `POST /feeds/{id}/refresh`, `POST /feeds/refresh` | force-poll one/all RSS feeds now, bypassing the adaptive schedule (admin); mail feeds are rejected — they are refreshed by polling the mail account |
+| `GET/POST /mail-accounts`, `PATCH/DELETE /mail-accounts/{id}` | per-user IMAP accounts for newsletter ingestion (any user, own accounts only — 404 across users). Folder is mandatory; the password is write-only (never returned, replace via PATCH). Deleting an account keeps the mail feeds/articles it produced |
+| `POST /mail-accounts/{id}/test`, `POST /mail-accounts/{id}/poll` | probe IMAP login + folder existence (returns ok/errors, never the password), or poll the account immediately (202 + message count; **409 when a poll is already running** for that account) |
 | `GET/PATCH /settings` | global: retention days, freeze window, thresholds, vector backend (admin). Precedence: **env var > DB override > code default**; env-set keys are reported in `env_locked`, shown read-only in the GUI, and rejected by PATCH |
 | `POST /settings/test-llm`, `POST /settings/test-qdrant`, `POST /settings/test-readeck` | connection probes for the external services (admin); return `ok` + errors without leaking secrets |
 | `POST /stories/{id}/merge` / `POST /articles/{id}/move` | manual override when clustering is wrong (important for trust) |
@@ -324,7 +350,7 @@ v1 is **data-first, no online learning**:
 | `GET /chat/history`, `DELETE /chat/history` | per-user chat history (server-side, cross-device): list turns oldest-first (assistant rows carry their citation cards), or wipe it (the GUI Clear button) |
 | `GET /health`, `GET /stats` | ops |
 | `GET /usage/summary?period=day\|month\|all`, `GET /usage/daily?days=`, `GET /usage/by-feed` | LLM token-usage metrics (admin): totals + per-kind/per-model breakdowns with throughput (tok/s), per-day series, per-source-feed history. Token counts flagged `estimated` when the server omitted `usage` |
-| `GET /favicon?host=` | cached favicon proxy for source logos in story cards (auth required; never a third-party favicon service — cache TTL via `FAVICON_CACHE_HOURS`) |
+| `GET /favicon?host=` | cached favicon proxy for source logos and feed icons (auth required; never a third-party favicon service — cache TTL via `FAVICON_CACHE_HOURS`). Fetch chain: `/favicon.ico`, then the homepage's `<link rel=icon>`, then parent domains (newsletter senders are often subdomains like `mail.example.com` with no icon of their own; never strips below two labels) |
 | `GET /feed.xml?category=&unread=1&limit=` | the story archive as an RSS 2.0 feed — each item is one story (headline, merged summary, lead image as `media:content`, primary source article as link). guid is the stable `story:{id}`; `pubDate` is the original article publication date and `atom:updated` tracks the latest revision date, so a version bump marks the item updated without re-notifying it. Auth via `?token=` (RSS readers can't set headers) |
 
 Manual merge/split is a deliberate feature: clustering *will* be wrong sometimes, and the
@@ -354,7 +380,9 @@ user must be able to fix it. Corrections can later feed threshold tuning.
   (sqlite-vec vs Qdrant).
 - **Activity page (admin)**: live stream of backend operations — feed polls, full-text
   fetches (and which fallback path was used), LLM summarization in progress, clustering
-  decisions, errors — backed by the SSE endpoint below. A compact "now processing"
+  decisions, errors — backed by the SSE endpoint below. A live "LLM interactions"
+  panel shows each in-flight LLM call with its prompt and (once finished) its reply
+  — see the observability section below. A compact "now processing"
   indicator is also visible in the main story view.
 - **Usage page (admin)**: LLM token-usage dashboard — today / this month / all-time
   cards, per-day chart, per-stage / per-model / per-feed tables with tok/s throughput,
@@ -392,6 +420,17 @@ LLM", …) in near real time.
   "3 articles waiting for LLM". The depth counts queued articles **plus the one
   currently being processed** (once the worker dequeues an article, the raw queue
   size would read 0 even though the LLM is busy).
+- **LLM interaction trace**: every external LLM call (chat + embeddings) is captured
+  in an in-memory ring (last 100 calls; deliberately NOT persisted — prompts carry
+  full article text and would bloat ACTIVITY_LOG). Each record carries the call kind
+  (summarize/embed/pairwise/novelty/headline/merge/newsletter_clean/newsletter_extract/chat_*/
+  share_translate/probe/other), a human label + article id, the truncated system/user
+  prompts (or embedding input stats), then the raw reply, latency, token usage and
+  attempt count. Records are broadcast live over the activity stream as
+  `llm_interaction` payloads (status running → done|error) and snapshotted via
+  `GET /activity/llm` for the Activity page's initial load. Call sites annotate the
+  current call through a task-local context (no signature changes to the LLM client).
+  Config: `LLM_TRACE_ENABLED` (default on), `LLM_TRACE_MAX_CHARS` (per-field clamp).
 - Also exposed: `GET /activity/recent` for the page's initial load.
 
 ---
@@ -475,6 +514,76 @@ hardware budget:
   `(feed_id, guid)` / canonical-URL dedupe, so old entries are never re-filtered.
   Skipped entries emit a `backfill_skipped` activity event.
 
+### Newsletter ingestion (mail)
+
+Newsletters arrive by email, not RSS. Any user can register an IMAP account +
+**mandatory folder** in the Settings GUI (per-user, not admin — own accounts only);
+the scheduler polls every enabled account every `MAIL_POLL_MINUTES` (default 15).
+
+- Polling is read-only: `SELECT folder, readonly` + `BODY.PEEK[]` — messages are
+  never flagged `\Seen`. Every IMAP connection uses a 30s socket timeout (a
+  stalled server must never wedge a request or the scheduler). Progress is
+  tracked by an IMAP **UID watermark**
+  (`last_uid`, persisted per processed message — crash-safe); at most
+  `MAIL_MAX_MESSAGES_PER_POLL` (default 20) new messages per poll, oldest first.
+  On an account's **first sync**, messages older than `FEED_BACKFILL_DAYS` are
+  skipped (but still advance the watermark).
+- **Poll-now is split in two phases**: the `POST /api/mail-accounts/{id}/poll`
+  endpoint runs only the fast SEARCH synchronously and answers 202 with the
+  message count; body downloads + full processing run in a background task
+  (failures land on `mail_fetch_error` / `mail_process_error` events and
+  `account.last_error`).
+- **One poll at a time per account**: the endpoint holds a per-account lock
+  from the search phase until background processing finishes (released in a
+  `finally`); a concurrent poll-now gets **409 Conflict** and the scheduler
+  sweep silently skips the account for that round. Without it a second poll
+  would reprocess the same messages — the UID watermark only advances as
+  messages complete.
+- **Senders become feeds**: each distinct From: address maps to a `FEED` with
+  `kind = 'mail'`, `sender_email`, title = the From display name, pseudo-URL
+  `newsletter:{sender}` (keeps the unique `url` constraint). Mail feeds show up in
+  the feed management page (newsletter badge + sender-domain favicon via the
+  `/favicon` proxy) but are never RSS-polled or force-refreshed.
+- **Link extraction is code-first, LLM-refined in two passes**: the HTML body
+  (or linkified plain text) is parsed for anchors; junk links (unsubscribe,
+  share intents, tracking wrappers, empty anchors) are filtered and URLs
+  canonicalized. Pass 1 (`NEWSLETTER_LLM_CLEAN`, default on) shows the model
+  the FULL email rendered as text with placeholder link tokens
+  (`[anchor](«L42»)` — never the real URLs, which are mostly tracking bloat)
+  and lets it DELETE the non-news chrome (greeting/intro, socials/footer,
+  sponsor credits, links back to the newsletter's own platform/site, app
+  links); surviving placeholders map back to candidate URLs, so hallucination
+  is impossible by construction. Pass 2 (`NEWSLETTER_LLM_EXTRACT`, default on)
+  is pure text mapping: each SURVIVING link gets a composed title + the
+  human-written intro text, validated against the code-extracted URL set
+  (hallucinated URLs are dropped). Fallbacks at every failure: pass 1
+  off/failed = all candidates kept (no chrome filtering at all — disabling it
+  means no LLM filtering happens); pass 2 off/failed = the enclosing block's
+  text minus the anchor.
+  (Deletion-only filtering is dramatically more reliable for small models than
+  one-pass triage+title+intro over dozens of near-identical entries.)
+- **Each link becomes an article** on the sender's mail feed and goes through the
+  standard pipeline unchanged (full-text fetch chain → summarize → embed →
+  cluster). The LLM summary still drives embeddings/clustering (§4), but the
+  newsletter intro is kept on `article.newsletter_intro` (and as `raw_content`
+  fallback): when the article creates a **new** story, the story summary is the
+  human-written intro — editorial text is preferred over the machine summary.
+  Once another source attaches with new facts, the merge flow rewrites the story
+  summary in `SUMMARY_LANGUAGE` as usual. `published_at` starts as the email's
+  `Date:` header (mere delivery time); the direct full-text fetch replaces it
+  with the linked page's real publication date — but ONLY from explicit
+  metadata (og/article meta tags, JSON-LD `datePublished`), never from guessed
+  values (URL paths, copyright years — those made story dates random). In any
+  doubt the email date stays. Recovery flags the `fulltext_fetch` event with
+  `date_recovered`. RSS entries keep their feedparser date — it is
+  authoritative.
+- Activity events (component `mail`): `mail_poll_start/done/failed`,
+  `newsletter_feed_created`, `newsletter_clean_start/done/error`,
+  `newsletter_extract_start/done/error`, `newsletter_message_error`,
+  `mail_account_created/deleted`. The clean and
+  extraction LLM calls are recorded as usage kinds `newsletter_clean` /
+  `newsletter_extract`.
+
 ---
 
 ## 10. Scale assumptions (v1)
@@ -506,6 +615,11 @@ Everything above is normative; this section is just a quick-reference recap.
 - **Categories**: seeded taxonomy, fully admin-customizable in the GUI.
 - **Feeds**: adaptive polling, conditional GETs, exponential backoff on errors,
   auto-disable after 7 consecutive days of failure (configurable), manual re-enable.
+  Two kinds: `rss` (HTTP-polled) and `mail` (newsletter ingestion from per-user
+  IMAP folders — senders become feeds, links become articles, §9).
+- **Newsletters**: per-user IMAP accounts with a mandatory folder, read-only
+  UID-watermark polling, code-first link extraction + one LLM refinement call per
+  message; human-written intros preferred over LLM summaries for new stories.
 - **Retention**: nightly purge, default 45 days, GUI-configurable.
 - **Vector store**: sqlite-vec by default; external Qdrant (URL + API key) as a
   pluggable backend — never spun up by this project.

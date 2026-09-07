@@ -6,6 +6,8 @@ import type {
   ChatResponse,
   ChatStory,
   Feed,
+  FeedOption,
+  MailAccount,
   ManagedUser,
   SimilarStory,
   StoryDetail,
@@ -34,6 +36,17 @@ export function faviconUrl(host: string): string {
     `/api/favicon?host=${encodeURIComponent(host)}` +
     (token ? `&token=${encodeURIComponent(token)}` : '')
   );
+}
+
+/** Host used for a feed's favicon: sender domain for newsletters, feed URL
+ * host for RSS. '' when unknown — skip the icon. */
+export function feedHost(feed: { url: string; kind: string; sender_email?: string | null }): string {
+  if (feed.kind === 'mail') return feed.sender_email?.split('@')[1] ?? '';
+  try {
+    return new URL(feed.url).hostname;
+  } catch {
+    return '';
+  }
 }
 
 /** Bearer header for raw fetch() calls outside req() (e.g. multipart, SSE-adjacent). */
@@ -162,12 +175,42 @@ export const api = {
     remove: (id: number) => req<void>(`/categories/${id}`, { method: 'DELETE' })
   },
 
+  // Per-user IMAP accounts for newsletter ingestion (password is write-only)
+  mailAccounts: {
+    list: () => req<MailAccount[]>('/mail-accounts'),
+    create: (a: {
+      host: string;
+      port?: number;
+      username: string;
+      password: string;
+      folder: string;
+      use_ssl?: boolean;
+    }) => req<MailAccount>('/mail-accounts', { method: 'POST', body: a }),
+    update: (id: number, patch: Partial<Omit<MailAccount, 'id' | 'created_at'>> & { password?: string }) =>
+      req<MailAccount>(`/mail-accounts/${id}`, { method: 'PATCH', body: patch }),
+    remove: (id: number) => req<void>(`/mail-accounts/${id}`, { method: 'DELETE' }),
+    test: (id: number) =>
+      req<{ ok: boolean; errors: string[]; folder: string | null }>(
+        `/mail-accounts/${id}/test`,
+        { method: 'POST' }
+      ),
+    // Returns immediately with the count; processing continues in the background
+    poll: (id: number) =>
+      req<{ found: number; processing: boolean }>(
+        `/mail-accounts/${id}/poll`,
+        { method: 'POST' }
+      )
+  },
+
   stories: {
-    list: (filter: string = 'all', category?: string, sort: string = 'published', order: string = 'asc') => {
+    list: (filter: string = 'all', category?: string, sort: string = 'published', order: string = 'asc', feedId?: number) => {
       const params = new URLSearchParams({ filter, sort, order });
       if (category) params.set('category', category);
+      if (feedId) params.set('feed', String(feedId));
       return req<StoryListItem[]>(`/stories?${params}`);
     },
+    // feeds with at least one story — story-list filter options (all users)
+    feedOptions: () => req<FeedOption[]>('/stories/feed-options'),
     detail: (id: number) => req<StoryDetail>(`/stories/${id}`),
     // proximity-ranked merge candidates (centroid cosine, best-first)
     similar: (id: number) => req<SimilarStory[]>(`/stories/${id}/similar`),

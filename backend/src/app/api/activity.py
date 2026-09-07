@@ -12,9 +12,10 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
+from app.core.config import settings
 from app.core.db import get_session
 from app.models import ActivityEvent, Article, Feed, User
-from app.services import activity
+from app.services import activity, llmtrace
 from app.services.process import queue_depth
 
 router = APIRouter(prefix="/activity", tags=["activity"])
@@ -68,39 +69,68 @@ class PipelineRow(BaseModel):
     story_id: int | None
 
 
+# Hard cap on in-flight rows returned (safety valve; a sane backlog is far smaller).
+# Finished articles are always limited to the most recent ones.
+_IN_FLIGHT_CAP = 500
+_FINISHED_ROWS = 20
+
+
 @router.get("/pipeline")
 async def pipeline(
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    """Snapshot of articles still moving through the pipeline (+ last finished)."""
-    rows = (
+    """Snapshot of the pipeline: every article still in flight + the last finished."""
+    base = select(Article, Feed.title).join(Feed, Article.feed_id == Feed.id)
+    in_flight = (
         await session.execute(
-            select(Article, Feed.title)
-            .join(Feed, Article.feed_id == Feed.id)
+            base.where(Article.processing_state != "clustered")
             .order_by(desc(Article.id))
-            .limit(60)
+            .limit(_IN_FLIGHT_CAP + 1)  # one extra to detect truncation
         )
     ).all()
-    out: list[PipelineRow] = []
-    for article, feed_title in rows:
-        if article.processing_state == "clustered" and len(out) >= 20:
-            continue  # keep the table focused on in-flight work
-        out.append(
-            PipelineRow(
-                id=article.id,
-                title=article.title,
-                feed_title=feed_title,
-                processing_state=article.processing_state,
-                fetched_at=article.fetched_at,
-                content_status=article.content_status,
-                story_id=article.story_id,
-            )
+    truncated = len(in_flight) > _IN_FLIGHT_CAP
+    in_flight = in_flight[:_IN_FLIGHT_CAP]
+    finished = (
+        await session.execute(
+            base.where(Article.processing_state == "clustered")
+            .order_by(desc(Article.id))
+            .limit(_FINISHED_ROWS)
         )
+    ).all()
+
+    def _row(article: Article, feed_title: str) -> PipelineRow:
+        return PipelineRow(
+            id=article.id,
+            title=article.title,
+            feed_title=feed_title,
+            processing_state=article.processing_state,
+            fetched_at=article.fetched_at,
+            content_status=article.content_status,
+            story_id=article.story_id,
+        )
+
+    out = [_row(a, t) for a, t in in_flight] + [_row(a, t) for a, t in finished]
     return {
         "states": _PIPELINE_STATES,
-        "rows": [r.model_dump(mode="json") for r in out[:40]],
+        "rows": [r.model_dump(mode="json") for r in out],
+        "in_flight": len(in_flight),
+        "truncated": truncated,
         "llm_queue_depth": queue_depth(),
+    }
+
+
+@router.get("/llm")
+async def llm_interactions(
+    limit: int = 50,
+    user: User = Depends(current_user),
+) -> dict[str, object]:
+    """Snapshot of the in-memory LLM interaction trace (SPEC §7) for the
+    Activity page's initial load; updates then arrive live over the SSE stream
+    as `llm_interaction` actions."""
+    return {
+        "enabled": settings.llm_trace_enabled,
+        "interactions": llmtrace.recent(min(limit, 100)),
     }
 
 

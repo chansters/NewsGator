@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models import Article, ChatMessage, Story
-from app.services import activity, llm_client, prompts, usage
+from app.services import activity, llm_client, llmtrace, prompts, usage
 from app.services.vectorstore import cosine_similarity, get_vector_store
 
 
@@ -29,12 +29,14 @@ class ChatError(RuntimeError):
 
 async def _embed_query(question: str) -> list[list[float]]:
     """Embedding seam (module-level for monkeypatching)."""
-    return await llm_client.embed([question])
+    with llmtrace.context("chat_embed", label=question[:120]):
+        return await llm_client.embed([question])
 
 
 async def _answer(system: str, user: str) -> tuple[dict[str, Any], int]:
     """LLM answer seam (module-level for monkeypatching)."""
-    return await llm_client.chat_json(system, user)
+    with llmtrace.context("chat_answer"):
+        return await llm_client.chat_json(system, user)
 
 
 def is_enabled() -> bool:

@@ -160,6 +160,12 @@
     /* match theme-color: the iOS status-bar glass sits on the page background
        so it reads as a subtle frosted band, not a smear on the nav */
     background: var(--bg);
+    /* the swipe deck lets cards fly off-screen sideways (over the gutters
+       around the centered column); clip that at the html level — on html
+       (not body) the viewport stays the scroll container, so position:sticky
+       keeps working; `clip` never creates a scroll container at all */
+    overflow-x: hidden;
+    overflow-x: clip;
   }
   :global(body) {
     font-family: system-ui, sans-serif;

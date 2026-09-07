@@ -15,6 +15,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from app.core.config import settings
+from app.services import llmtrace
 
 
 class LLMError(RuntimeError):
@@ -77,69 +78,139 @@ async def chat_json(
     parse failure (SPEC §8). Returns (parsed_json, latency_ms)."""
     start = time.monotonic()
     last_usage.set(None)
+    trace = llmtrace.begin_chat(model or settings.llm_model, system, user)
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
     last_error: Exception | None = None
-    for attempt in range(2):
-        try:
-            resp = await _chat_client().chat.completions.create(
-                model=model or settings.llm_model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0.2,
-            )
-            # Usage of the successful attempt (a failed first attempt's tokens
-            # are lost — acceptable, retries are rare).
-            last_usage.set(_extract_usage(resp))
-            content = resp.choices[0].message.content or ""
-            parsed = json.loads(content)
-            if not isinstance(parsed, dict):
-                raise LLMError(f"LLM returned JSON {type(parsed).__name__}, expected object")
-            latency_ms = int((time.monotonic() - start) * 1000)
-            return parsed, latency_ms
-        except (json.JSONDecodeError, LLMError) as exc:
-            last_error = exc
-            if attempt == 0:
-                # one retry, explicitly asking for valid JSON
-                messages.append(
-                    {"role": "user", "content": "Your previous reply was not valid JSON. "
-                     "Reply with ONLY a valid JSON object."}
+    try:
+        for attempt in range(2):
+            try:
+                resp = await _chat_client().chat.completions.create(
+                    model=model or settings.llm_model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
                 )
-            continue
-        except Exception as exc:
-            raise LLMError(f"LLM request failed: {exc}") from exc
-    raise LLMError(f"LLM returned invalid JSON after retry: {last_error}")
+                # Usage of the successful attempt (a failed first attempt's tokens
+                # are lost — acceptable, retries are rare).
+                last_usage.set(_extract_usage(resp))
+                content = resp.choices[0].message.content or ""
+                parsed = json.loads(content)
+                if not isinstance(parsed, dict):
+                    raise LLMError(
+                        f"LLM returned JSON {type(parsed).__name__}, expected object"
+                    )
+                latency_ms = int((time.monotonic() - start) * 1000)
+                llmtrace.complete(
+                    trace,
+                    content,
+                    latency_ms=latency_ms,
+                    usage=last_usage.get(),
+                    attempts=attempt + 1,
+                )
+                return parsed, latency_ms
+            except (json.JSONDecodeError, LLMError) as exc:
+                last_error = exc
+                if attempt == 0:
+                    # one retry, explicitly asking for valid JSON
+                    messages.append(
+                        {"role": "user", "content": "Your previous reply was not valid JSON. "
+                         "Reply with ONLY a valid JSON object."}
+                    )
+                continue
+            except Exception as exc:
+                raise LLMError(f"LLM request failed: {exc}") from exc
+        raise LLMError(f"LLM returned invalid JSON after retry: {last_error}")
+    except LLMError as exc:
+        llmtrace.fail(
+            trace, str(exc), latency_ms=int((time.monotonic() - start) * 1000)
+        )
+        raise
+
+
+async def chat_text(
+    system: str, user: str, *, model: str | None = None
+) -> tuple[str, int]:
+    """Chat completion for FREE-FORM text (no JSON mode, no parse retry).
+
+    Used by the newsletter clean pass, whose output is verbatim newsletter
+    content. Traced and usage-captured exactly like chat_json so tests keep
+    monkeypatching the module seams.
+    """
+    start = time.monotonic()
+    last_usage.set(None)
+    trace = llmtrace.begin_chat(model or settings.llm_model, system, user)
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    try:
+        resp = await _chat_client().chat.completions.create(
+            model=model or settings.llm_model,
+            messages=messages,
+            temperature=0.2,
+        )
+        last_usage.set(_extract_usage(resp))
+        content = resp.choices[0].message.content or ""
+        latency_ms = int((time.monotonic() - start) * 1000)
+        llmtrace.complete(
+            trace, content, latency_ms=latency_ms, usage=last_usage.get(), attempts=1
+        )
+        return content, latency_ms
+    except Exception as exc:
+        llmtrace.fail(
+            trace, str(exc), latency_ms=int((time.monotonic() - start) * 1000)
+        )
+        raise LLMError(f"LLM request failed: {exc}") from exc
 
 
 async def embed(texts: list[str], *, model: str | None = None) -> list[list[float]]:
     """Embeddings for a batch of texts."""
     last_usage.set(None)
+    trace = llmtrace.begin_embed(model or settings.embed_model, texts)
+    start = time.monotonic()
     try:
         resp = await _embed_client().embeddings.create(
             model=model or settings.embed_model, input=texts
         )
     except Exception as exc:
+        llmtrace.fail(
+            trace,
+            f"Embedding request failed: {exc}",
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
         raise LLMError(f"Embedding request failed: {exc}") from exc
     last_usage.set(_extract_usage(resp))
-    return [list(d.embedding) for d in resp.data]
+    vectors = [list(d.embedding) for d in resp.data]
+    llmtrace.complete(
+        trace,
+        {
+            "vectors": len(vectors),
+            "dimensions": len(vectors[0]) if vectors else 0,
+        },
+        latency_ms=int((time.monotonic() - start) * 1000),
+        usage=last_usage.get(),
+    )
+    return vectors
 
 
 async def test_connection() -> dict[str, Any]:
     """Admin 'test connection' probe — cheap chat + embeddings ping."""
     result: dict[str, Any] = {"chat": False, "embeddings": False, "errors": []}
-    try:
-        await chat_json(
-            "You are a health probe. Reply with JSON.",
-            'Respond with exactly: {"ok": true}',
-        )
-        result["chat"] = True
-    except LLMError as exc:
-        result["errors"].append(str(exc))
-    try:
-        await embed(["health probe"])
-        result["embeddings"] = True
-    except LLMError as exc:
-        result["errors"].append(str(exc))
+    with llmtrace.context("probe", label="settings test connection"):
+        try:
+            await chat_json(
+                "You are a health probe. Reply with JSON.",
+                'Respond with exactly: {"ok": true}',
+            )
+            result["chat"] = True
+        except LLMError as exc:
+            result["errors"].append(str(exc))
+        try:
+            await embed(["health probe"])
+            result["embeddings"] = True
+        except LLMError as exc:
+            result["errors"].append(str(exc))
     return result

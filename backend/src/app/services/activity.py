@@ -30,7 +30,8 @@ def unsubscribe(q: asyncio.Queue[dict[str, Any]]) -> None:
     _subscribers.discard(q)
 
 
-def _broadcast(payload: dict[str, Any]) -> None:
+def broadcast(payload: dict[str, Any]) -> None:
+    """Push a raw payload to SSE subscribers (never blocks the pipeline)."""
     for q in list(_subscribers):
         try:
             q.put_nowait(payload)
@@ -40,7 +41,7 @@ def _broadcast(payload: dict[str, Any]) -> None:
 
 def broadcast_queue(depth: int) -> None:
     """Push the LLM queue depth to SSE subscribers (SPEC §7)."""
-    _broadcast({"action": "queue", "llm_queue_depth": depth})
+    broadcast({"action": "queue", "llm_queue_depth": depth})
 
 
 async def emit(
@@ -59,7 +60,7 @@ async def emit(
         detail=json.dumps(detail, ensure_ascii=False),
     )
     session.add(event)
-    _broadcast(
+    broadcast(
         {
             "level": level,
             "component": component,

@@ -14,7 +14,7 @@ filtered to the known LANGUAGE_NAMES) — configurable per invariant 5. Sharing
 from typing import TYPE_CHECKING, Any
 
 from app.core.config import settings
-from app.services import llm_client, prompts
+from app.services import llm_client, llmtrace, prompts
 
 if TYPE_CHECKING:
     from app.models import Article, Story
@@ -49,7 +49,10 @@ async def _translate(
 ) -> tuple[dict[str, Any], int]:
     """LLM seam (module-level for monkeypatching in tests)."""
     system, user = prompts.translate_story_text(title, summary, target_language)
-    return await llm_client.chat_json(system, user)
+    with llmtrace.context(
+        "share_translate", label=f"{title[:80]} → {target_language}"
+    ):
+        return await llm_client.chat_json(system, user)
 
 
 async def prepare_share(

@@ -101,6 +101,9 @@ class FeedPatch(BaseModel):
 class FeedOut(BaseModel):
     id: int
     url: str
+    # 'rss' or 'mail' (newsletter ingestion; never RSS-polled)
+    kind: str = "rss"
+    sender_email: str | None = None
     title: str
     is_enabled: bool
     poll_interval_min: int
@@ -109,6 +112,49 @@ class FeedOut(BaseModel):
     last_error: str | None
     consecutive_failures: int
     fetch_fulltext: bool
+    # populated by GET /feeds only (per requesting user for unread) — 0 elsewhere
+    story_count: int = 0
+    unread_story_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+# --- newsletter ingestion (per-user IMAP accounts) ---
+
+
+class MailAccountIn(BaseModel):
+    host: str = Field(min_length=1, max_length=256)
+    port: int = Field(default=993, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=512)
+    folder: str = Field(min_length=1, max_length=256)  # mandatory (SPEC §9)
+    use_ssl: bool = True
+
+
+class MailAccountPatch(BaseModel):
+    host: str | None = Field(default=None, min_length=1, max_length=256)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = Field(default=None, min_length=1, max_length=256)
+    # None = unchanged; the password can be replaced but never cleared or read back
+    password: str | None = Field(default=None, min_length=1, max_length=512)
+    folder: str | None = Field(default=None, min_length=1, max_length=256)
+    use_ssl: bool | None = None
+    is_enabled: bool | None = None
+
+
+class MailAccountOut(BaseModel):
+    id: int
+    host: str
+    port: int
+    username: str
+    folder: str
+    use_ssl: bool
+    is_enabled: bool
+    last_uid: int
+    last_checked_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    # password is deliberately never returned
 
     model_config = {"from_attributes": True}
 
