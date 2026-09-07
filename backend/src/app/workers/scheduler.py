@@ -19,11 +19,23 @@ scheduler = AsyncIOScheduler()
 async def poll_due_feeds() -> None:
     async for session in get_session():
         now = datetime.now(UTC)
-        feeds = (await session.scalars(select(Feed).where(Feed.is_enabled))).all()
+        # Mail feeds are populated by the IMAP sweep, never RSS-polled
+        feeds = (
+            await session.scalars(
+                select(Feed).where(Feed.is_enabled, Feed.kind == "rss")
+            )
+        ).all()
         due = [f for f in feeds if is_due(f, now)]
         for feed in due:
             await poll_feed(session, feed)  # errors handled inside poll_feed
         break
+
+
+async def mail_poll_sweep() -> None:
+    """Poll every enabled per-user IMAP account for newsletters (SPEC §9)."""
+    from app.services.mailnews import poll_all_accounts
+
+    await poll_all_accounts()
 
 
 async def freeze_sweep() -> None:
@@ -74,6 +86,14 @@ def start_scheduler() -> None:
         trigger="interval",
         minutes=settings.backlog_sweep_minutes,
         id="llm_backlog_sweep",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        mail_poll_sweep,
+        trigger="interval",
+        minutes=settings.mail_poll_minutes,
+        id="mail_poll_sweep",
         max_instances=1,
         coalesce=True,
     )

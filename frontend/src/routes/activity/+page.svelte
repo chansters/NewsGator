@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { currentUser } from '$lib/stores';
   import { api, authHeaders, streamUrl } from '$lib/api';
-  import type { PipelineRow } from '$lib/types';
+  import type { LLMInteraction, PipelineRow } from '$lib/types';
 
   interface ActivityEvent {
     ts?: string;
@@ -19,8 +19,12 @@
   let live = $state(false);
   let pipelineStates = $state<string[]>([]);
   let pipelineRows = $state<PipelineRow[]>([]);
+  let pipelineInFlight = $state(0);
+  let pipelineTruncated = $state(false);
   let lastEventAt = $state(0);
   let reprocessing = $state<number | null>(null);
+  let llmInteractions = $state<LLMInteraction[]>([]);
+  let llmTraceEnabled = $state(false);
 
   async function reprocess(articleId: number) {
     reprocessing = articleId;
@@ -37,7 +41,9 @@
   const PIPELINE_EVENTS = new Set([
     'feed_poll_done', 'fulltext_fetch', 'manual_reprocess',
     'summarize_start', 'summarize_done', 'summarize_error',
-    'embed_done', 'process_error', 'queue'
+    'embed_done', 'process_error', 'queue',
+    // newsletter ingestion also feeds the LLM pipeline — refresh on mail events
+    'mail_poll_start', 'mail_poll_done', 'newsletter_processing', 'newsletter_feed_created'
   ]);
 
   async function loadPipeline() {
@@ -49,6 +55,8 @@
     const body = await res.json();
     pipelineStates = body.states;
     pipelineRows = body.rows;
+    pipelineInFlight = body.in_flight ?? 0;
+    pipelineTruncated = body.truncated ?? false;
     queueDepth = body.llm_queue_depth;
   }
 
@@ -63,6 +71,15 @@
       queueDepth = body.llm_queue_depth;
     }
     await loadPipeline();
+    const llmRes = await fetch('/api/activity/llm', {
+      credentials: 'include',
+      headers: authHeaders()
+    });
+    if (llmRes.ok) {
+      const body = await llmRes.json();
+      llmTraceEnabled = body.enabled;
+      llmInteractions = body.interactions; // newest first
+    }
     connect();
   });
 
@@ -76,6 +93,17 @@
       if (payload.action === 'queue' || payload.llm_queue_depth !== undefined) {
         queueDepth = payload.llm_queue_depth;
         if (payload.action === 'queue') loadPipeline();  // skip duplicate load on 'hello'
+        return;
+      }
+      if (payload.action === 'llm_interaction') {
+        llmTraceEnabled = true;
+        const it = payload.interaction as LLMInteraction;
+        const idx = llmInteractions.findIndex((x) => x.id === it.id);
+        if (idx >= 0) {
+          llmInteractions[idx] = it; // status flip running → done/error
+        } else {
+          llmInteractions = [it, ...llmInteractions].slice(0, 50);
+        }
         return;
       }
       events = [...events.slice(-499), payload];
@@ -128,9 +156,71 @@
   </select>
 </div>
 
+{#if llmTraceEnabled}
+  <div class="card">
+    <h2>LLM interactions</h2>
+    <div class="llmlist">
+      {#each llmInteractions as it (it.id)}
+        <details class="llmitem" open={it.status === 'running'}>
+          <summary>
+            <span class="ldot {it.status}"></span>
+            <span class="lkind">{it.kind}</span>
+            <span class="llabel">{it.label ?? ''}</span>
+            <span class="lmeta">
+              {it.model}
+              {#if it.status === 'done' && it.latency_ms !== null}· {(it.latency_ms / 1000).toFixed(1)}s{/if}
+              {#if it.usage?.total_tokens}· {it.usage.total_tokens} tok{/if}
+              {#if it.attempts > 1}· {it.attempts} attempts{/if}
+            </span>
+            <span class="lts">{new Date(it.ts).toLocaleTimeString()}</span>
+          </summary>
+          <div class="lbody">
+            {#if it.endpoint === 'chat'}
+              <h3>
+                System prompt
+                {#if it.request.system_chars}
+                  <span class="chars">{it.request.system_chars} chars</span>
+                {/if}
+              </h3>
+              <pre>{it.request.system}</pre>
+              <h3>
+                User prompt
+                {#if it.request.user_chars}
+                  <span class="chars">
+                    {it.request.user_chars} chars{#if it.request.truncated}, truncated{/if}
+                  </span>
+                {/if}
+              </h3>
+              <pre>{it.request.user}</pre>
+            {:else}
+              <h3>Embedding input</h3>
+              <p class="embedinfo">{it.request.texts} text(s), {it.request.chars} chars total</p>
+              <pre>{it.request.sample}</pre>
+            {/if}
+            <h3>Response</h3>
+            {#if it.status === 'running'}
+              <p class="waiting">waiting for the LLM…</p>
+            {:else if it.status === 'error'}
+              <pre class="errtext">{it.error}</pre>
+            {:else}
+              <pre>{it.response}</pre>
+            {/if}
+          </div>
+        </details>
+      {:else}
+        <p class="empty">No LLM calls yet — prompts and replies appear here live as the pipeline runs.</p>
+      {/each}
+    </div>
+  </div>
+{/if}
+
 {#if pipelineRows.length}
   <div class="card">
     <h2>Pipeline</h2>
+    <p class="sub">
+      {pipelineInFlight} in flight{pipelineTruncated ? ' (showing first 500)' : ''}
+      · last {Math.max(0, pipelineRows.length - pipelineInFlight)} finished
+    </p>
     <div class="tablewrap">
       <table>
       <thead>
@@ -218,6 +308,40 @@
   }
   button.link:disabled { color: var(--faint); cursor: default; }
   @keyframes pulse { 50% { opacity: 0.25; } }
+  /* live LLM interaction trace */
+  .llmlist { max-height: 60vh; overflow-y: auto; }
+  .llmitem { border-top: 1px solid var(--row-border); padding: 0.3rem 0; }
+  .llmitem summary {
+    display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
+    cursor: pointer; font-size: 0.88rem; list-style: none; min-width: 0;
+  }
+  .llmitem summary::-webkit-details-marker { display: none; }
+  .ldot { width: 9px; height: 9px; border-radius: 50%; flex: none; align-self: center; }
+  .ldot.running { background: #f90; animation: pulse 1.2s ease-in-out infinite; }
+  .ldot.done { background: var(--ok); }
+  .ldot.error { background: var(--error); }
+  .lkind {
+    background: var(--accent); color: var(--bg); border-radius: 999px;
+    padding: 0 0.5rem; font-size: 0.78em; font-weight: 600; flex: none;
+  }
+  .llabel { font-weight: 500; overflow-wrap: anywhere; min-width: 0; }
+  .lmeta { margin-left: auto; color: var(--faint); font-size: 0.8em; }
+  .lts { color: var(--faint); font-size: 0.8em; }
+  .lbody { padding: 0.4rem 0 0.4rem 1.2rem; }
+  .lbody h3 {
+    font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--muted); margin: 0.6rem 0 0.2rem;
+  }
+  .lbody .chars { font-weight: 400; text-transform: none; color: var(--faint); }
+  .lbody pre {
+    margin: 0; padding: 0.5rem 0.6rem; background: var(--bg); border-radius: 6px;
+    font-size: 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 16rem; overflow-y: auto;
+  }
+  .lbody pre.errtext { color: var(--error); }
+  .lbody .waiting { color: #f90; font-size: 0.85rem; margin: 0.2rem 0; }
+  .lbody .embedinfo { color: var(--text-secondary); font-size: 0.85rem; margin: 0.2rem 0; }
+  .empty { color: var(--faint); }
   .log { font-family: ui-monospace, monospace; font-size: 0.82rem; max-height: 70vh; overflow-y: auto; }
   .line { display: flex; gap: 0.7rem; padding: 0.12rem 0; border-bottom: 1px solid var(--row-border); }
   .line.warn { color: var(--warn); }

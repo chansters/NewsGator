@@ -82,6 +82,11 @@ async def test_legacy_create_all_db_stamped_and_upgraded(
     # a real pre-0005 DB never had them
     sync_conn.execute("DROP TABLE llm_usage")
     sync_conn.execute("DROP TABLE chat_message")
+    # 0012 (newsletter mail) likewise: table + columns added later
+    sync_conn.execute("ALTER TABLE feed DROP COLUMN kind")
+    sync_conn.execute("ALTER TABLE feed DROP COLUMN sender_email")
+    sync_conn.execute("ALTER TABLE article DROP COLUMN newsletter_intro")
+    sync_conn.execute("DROP TABLE mail_account")
     sync_conn.commit()
     sync_conn.close()
     db.init_engine(engine_url)  # reconnect after the sync-side ALTER
@@ -96,6 +101,10 @@ async def test_legacy_create_all_db_stamped_and_upgraded(
     assert "readeck_bookmark_id" in _columns(path, "story")
     assert "estimated" in _columns(path, "llm_usage")
     assert "stories_json" in _columns(path, "chat_message")
+    assert "kind" in _columns(path, "feed")
+    assert "sender_email" in _columns(path, "feed")
+    assert "newsletter_intro" in _columns(path, "article")
+    assert "last_uid" in _columns(path, "mail_account")
 
 
 async def test_already_at_head_is_noop(engine_url: str, tmp_path) -> None:

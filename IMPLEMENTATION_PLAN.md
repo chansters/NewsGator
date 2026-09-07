@@ -183,6 +183,35 @@ config validated; image build is the one step to run on the target machine)
   citations denormalized into `stories_json`) so it follows the user across
   devices; `GET/DELETE /api/chat/history`. GUI: `/chat` page + nav link +
   Settings "Chatbot" group.
+- Readeck export ✅ (2026-08-26): `POST /api/stories/{id}/readeck` pushes a story as a
+  permanent self-contained bookmark to a Readeck instance (`services/readeck.py`,
+  optional — `READECK_BASE_URL`+`READECK_TOKEN`).
+- Story sharing ✅ (2026-08-27): `POST /api/stories/{id}/share` with on-demand
+  translation (`SHARE_LANGUAGES`); `ShareButton.svelte` with Web Share / clipboard.
+- LLM usage metrics ✅ (2026-08-27): append-only `llm_usage` (Alembic 0010),
+  `GET /api/usage/*`, `/usage` GUI page with price playground.
+- User management ✅ (2026-08-27): admin-only `/api/users` CRUD + Settings GUI card.
+- Proximity-ranked story pickers ✅ (2026-09-01): `GET /api/stories/{id}/similar` and
+  `/api/stories/articles/{id}/similar-stories` (ANN + exact cosine re-rank) backing the
+  `StoryPicker.svelte` merge/move comboboxes.
+- Story RSS feed ✅ (2026-09-01): `GET /api/feed.xml` exposes the story archive as
+  RSS 2.0 (token auth, category/unread/limit filters) + per-user Settings card.
+- LLM interaction trace ✅ (2026-09-07): in-memory ring (`services/llmtrace.py`, last
+  100) broadcast over the activity SSE stream as `llm_interaction` payloads,
+  snapshot `GET /api/activity/llm`, "LLM interactions" card on the Activity page
+  (`LLM_TRACE_ENABLED`/`LLM_TRACE_MAX_CHARS`).
+- Feed filter + counts + favicons ✅ (2026-09-07): `GET /api/stories?feed=`,
+  `GET /api/stories/feed-options`, `story_count`/`unread_story_count` on
+  `GET /api/feeds`, favicon proxy chain (favicon.ico → `<link rel=icon>` → parent
+  domains, desktop UA, 1h failure cache), feed dropdown on the Stories page.
+- Newsletter ingestion ✅ (2026-09-06): per-user IMAP accounts (Alembic 0012
+  `mail_account`, folder mandatory, read-only polling with UID watermark, 30s socket
+  timeouts), senders become `kind=mail` feeds (`newsletter:{email}` pseudo-URL),
+  code-first link extraction + two LLM passes (`newsletter_clean` deletes chrome via
+  placeholder links, `newsletter_extract` maps titles/intros — hallucination-proof by
+  URL-set validation), `article.newsletter_intro` preferred for new-story summaries.
+  API `/api/mail-accounts` (+ test/poll), scheduler `mail_poll_sweep`, GUI Settings
+  card + Feeds-page ✉ badge.
 
 ---
 

@@ -135,6 +135,90 @@ Reply with JSON: {{"same_event": true|false}}"""
     return system, user
 
 
+def newsletter_clean(subject: str, body: str) -> tuple[str, str]:
+    """Pass 1 of newsletter processing: delete everything that is not news.
+
+    The body is the FULL email rendered as text where every link is a
+    placeholder token ([visible text](«L42») — never the real URL, which is
+    hundreds of characters of tracking junk the model doesn't need to judge
+    the link's role). The model only DELETES chrome (intro, socials, sponsors,
+    platform self-links); surviving placeholders are resolved back to URLs by
+    code (mailnews._llm_clean_filter). Deletion-only is far more reliable for
+    small models than per-link triage in one structured pass.
+    """
+    system = (
+        "You clean up email newsletters for a personal news reader. "
+        "You never add, translate or rephrase text: you only delete. "
+        "Reply with ONLY the cleaned newsletter content, in the same language."
+    )
+    user = f"""Below is the full content of a newsletter email (subject: {subject}),
+rendered as text. Each link appears as [visible text](«L42»): the «L42» token
+is just a numbered reference to a web URL — never delete or modify the tokens
+themselves, and never invent new ones.
+
+Delete everything that is NOT curated news content:
+- the greeting/introduction, personal notes, announcements about the newsletter
+  itself (schedule, account renames, accessibility notes, thank-you lists) and
+  the sign-off;
+- sponsor / patron / "mécènes" credits;
+- the social-media and footer block (the author's own YouTube, Twitch, Podcast,
+  Instagram, TikTok, Threads, Bluesky, Discord, website links);
+- any link back to the newsletter's own platform or site (Patreon, the
+  author's own site) and app-download links (Google Play / App Store).
+
+Keep ONLY the news section: each news item with its link token and the
+author's description, COPIED VERBATIM (same language, same words, one item per
+paragraph). Do not summarize, translate or reorder.
+
+Newsletter content:
+{body}"""
+    return system, user
+
+
+def newsletter_extract(
+    sender: str, subject: str, items: list[tuple[str, str, str]]
+) -> tuple[str, str]:
+    """Map pre-filtered newsletter links to (title, verbatim intro).
+
+    Filtering is pass 1's job (newsletter_clean): the links handed here are
+    already news. items = (url, anchor_text, nearby_text) pre-extracted from
+    the HTML by code — the LLM may only pick from these URLs (hallucinated
+    URLs are dropped by the caller). The intro is COPIED VERBATIM from the
+    newsletter (never paraphrased or invented), kept in the newsletter's own
+    language ON PURPOSE: it is displayed as-is when it becomes a new story's
+    summary (the LLM summary still drives embeddings/clustering per
+    invariant 2).
+    """
+    lines = "\n".join(
+        f"- URL: {url}\n  anchor: {anchor}\n  context: {context}"
+        for url, anchor, context in items
+    )
+    system = (
+        "You curate article links from email newsletters for a personal news reader. "
+        "Reply with ONLY a valid JSON object."
+    )
+    user = f"""This newsletter from {sender} (subject: {subject}) points its readers at
+the links below — they are already filtered down to real news items.
+
+For each link, fill:
+- "title": a short factual title for the linked article. Do NOT just copy the
+  anchor when it is only a site/domain name — compose a real headline from the
+  context instead;
+- "intro": the EXACT sentence(s) the newsletter writes about this link, COPIED
+  VERBATIM from the context below. Do NOT summarize, translate, rephrase or
+  invent text — copy the newsletter's own words (you may trim the anchor text
+  itself and list markers). Empty string only if the newsletter says nothing
+  about the link.
+
+Only use URLs from the list below, exactly as given.
+
+Reply with JSON: {{"items": [{{"url": "...", "title": "...", "intro": "..."}}]}}
+
+Links:
+{lines}"""
+    return system, user
+
+
 def chat_answer(
     question: str,
     stories: list[tuple[int, str, str, str, str]],

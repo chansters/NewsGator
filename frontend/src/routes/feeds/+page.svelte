@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api } from '$lib/api';
+  import { api, faviconUrl, feedHost } from '$lib/api';
   import type { Feed } from '$lib/types';
 
   let feeds = $state<Feed[]>([]);
@@ -98,6 +98,11 @@
   function fmt(d: string | null) {
     return d ? new Date(d).toLocaleString() : 'never';
   }
+
+  /** Broken/missing favicon → drop the img instead of a broken-image glyph. */
+  function hideFav(e: Event) {
+    (e.currentTarget as HTMLImageElement).remove();
+  }
 </script>
 
 <h1>Feeds</h1>
@@ -135,33 +140,60 @@
 </div>
 
 {#each feeds as feed (feed.id)}
+  {@const host = feedHost(feed)}
   <div class="card feed">
     <div class="row">
+      {#if host}
+        <img class="favicon" src={faviconUrl(host)} alt="" loading="lazy" onerror={hideFav} />
+      {/if}
       <strong>{feed.title || feed.url}</strong>
+      {#if feed.kind === 'mail'}
+        <span class="badge mail">✉ newsletter</span>
+      {/if}
       <span class="badge" class:off={!feed.is_enabled}>
         {feed.is_enabled ? 'enabled' : 'disabled'}
       </span>
+      {#if feed.story_count > 0}
+        <a
+          class="badge counts"
+          href="/?feed={feed.id}"
+          title="Stories with a source from this feed — click to view"
+        >
+          {feed.story_count}
+          {feed.story_count === 1 ? 'story' : 'stories'}{#if feed.unread_story_count > 0}
+            · {feed.unread_story_count} unread{/if}
+        </a>
+      {:else}
+        <span class="badge counts none">no stories</span>
+      {/if}
       {#if feed.consecutive_failures > 0}
         <span class="badge warn">{feed.consecutive_failures} failures</span>
       {/if}
       <span class="spacer"></span>
-      <button onclick={() => refresh(feed)} disabled={!feed.is_enabled || refreshingId === feed.id}>
-        {refreshingId === feed.id ? '…' : '↻ Refresh'}
-      </button>
+      {#if feed.kind === 'rss'}
+        <button onclick={() => refresh(feed)} disabled={!feed.is_enabled || refreshingId === feed.id}>
+          {refreshingId === feed.id ? '…' : '↻ Refresh'}
+        </button>
+      {/if}
       <button onclick={() => toggle(feed)}>{feed.is_enabled ? 'Disable' : 'Enable'}</button>
       <button class="danger" onclick={() => remove(feed)}>Delete</button>
     </div>
     <div class="meta">
-      <span>{feed.url}</span>
-      <span>polls every {feed.poll_interval_min} min</span>
-      <span>
-        initial import: {feed.backfill_days === null
-          ? 'server default'
-          : feed.backfill_days === 0
-            ? 'everything'
-            : `last ${feed.backfill_days}d`}
-      </span>
-      <span>last fetched: {fmt(feed.last_fetched_at)}</span>
+      {#if feed.kind === 'mail'}
+        <span>from: {feed.sender_email}</span>
+        <span>populated by the mailbox poll (Settings → Newsletter inboxes)</span>
+      {:else}
+        <span>{feed.url}</span>
+        <span>polls every {feed.poll_interval_min} min</span>
+        <span>
+          initial import: {feed.backfill_days === null
+            ? 'server default'
+            : feed.backfill_days === 0
+              ? 'everything'
+              : `last ${feed.backfill_days}d`}
+        </span>
+        <span>last fetched: {fmt(feed.last_fetched_at)}</span>
+      {/if}
     </div>
     {#if feed.last_error}<p class="error small">Last error: {feed.last_error}</p>{/if}
   </div>
@@ -192,6 +224,15 @@
   }
   .badge.off { background: var(--frozen-bg); color: var(--frozen-text); }
   .badge.warn { background: var(--error-bg); color: var(--error); }
+  .badge.mail { background: var(--chip-bg); color: var(--accent); }
+  .badge.counts {
+    background: var(--chip-bg);
+    color: var(--text-secondary);
+    text-decoration: none;
+  }
+  a.badge.counts:hover { color: var(--accent); }
+  .badge.counts.none { opacity: 0.6; }
+  .favicon { width: 1.1rem; height: 1.1rem; border-radius: 3px; }
   .meta {
     display: flex;
     gap: 1rem;

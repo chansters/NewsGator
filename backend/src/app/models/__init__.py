@@ -60,6 +60,12 @@ class Feed(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     url: Mapped[str] = mapped_column(String(1024), unique=True)
+    # 'rss' (polled over HTTP) or 'mail' (populated by newsletter ingestion from
+    # an IMAP mailbox — never RSS-polled; SPEC §9). Mail feeds use the pseudo-URL
+    # `newsletter:{sender_email}` to satisfy the unique constraint on url.
+    kind: Mapped[str] = mapped_column(String(16), default="rss")
+    # Sender address for mail feeds (From: header of the newsletter); None for RSS
+    sender_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     title: Mapped[str] = mapped_column(String(512), default="")
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     poll_interval_min: Mapped[int] = mapped_column(Integer, default=30)
@@ -157,6 +163,10 @@ class Article(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     story_id: Mapped[int | None] = mapped_column(ForeignKey("story.id"), nullable=True)
+    # Human-written intro extracted from the source newsletter (mail feeds only).
+    # The LLM summary still drives embeddings/clustering (invariant 2), but a NEW
+    # story created from this article shows this text instead (SPEC §4).
+    newsletter_intro: Mapped[str | None] = mapped_column(Text, nullable=True)
     # fetched → fulltext → summarized → embedded → clustered (SPEC §8)
     processing_state: Mapped[str] = mapped_column(String(32), default="fetched", index=True)
     content_status: Mapped[str] = mapped_column(String(16), default="full")
@@ -229,6 +239,35 @@ class OverridePair(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
+class MailAccount(Base):
+    """Per-user IMAP inbox polled for newsletters (SPEC §9 mail ingestion).
+
+    Each account points at one mandatory folder; the scheduler fetches messages
+    with UID > last_uid (watermark advances per processed message — resumability,
+    invariant 7). Messages are never flagged \\Seen (read-only SELECT + PEEK).
+    Sender addresses discovered in the folder become mail Feeds.
+    """
+
+    __tablename__ = "mail_account"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    host: Mapped[str] = mapped_column(String(256))
+    port: Mapped[int] = mapped_column(Integer, default=993)
+    username: Mapped[str] = mapped_column(String(256))
+    # Stored in clear like every other secret in this self-hosted app (the
+    # settings table holds API keys the same way); never returned by the API.
+    password: Mapped[str] = mapped_column(String(512))
+    folder: Mapped[str] = mapped_column(String(256))  # mandatory (SPEC §9)
+    use_ssl: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # IMAP UID watermark — only messages with UID > last_uid are processed
+    last_uid: Mapped[int] = mapped_column(Integer, default=0)
+    last_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
 class LLMUsage(Base):
     """One row per external LLM call, for usage/cost/performance metrics.
 
@@ -246,7 +285,7 @@ class LLMUsage(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     # summarize|embed|cluster_embed|pairwise|novelty|headline|merge|share_translate|backfill_embed
-    # |chat_embed|chat_answer
+    # |chat_embed|chat_answer|newsletter_clean|newsletter_extract
     kind: Mapped[str] = mapped_column(String(32), index=True)
     endpoint: Mapped[str] = mapped_column(String(8), default="chat")  # chat|embed
     model: Mapped[str] = mapped_column(String(128), default="")

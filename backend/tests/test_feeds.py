@@ -51,6 +51,46 @@ async def test_feed_not_found(client: AsyncClient) -> None:
     assert (await client.delete("/api/feeds/999")).status_code == 404
 
 
+async def test_feed_story_counts(client: AsyncClient, db_session) -> None:
+    """GET /feeds reports per-feed story + unread counts (unread = per the
+    requesting user)."""
+    from app.models import Article, Feed, Story
+
+    await setup_admin(client)
+    async with db_session() as s:
+        f1 = Feed(url="https://one.example.com/rss", title="One")
+        f2 = Feed(url="https://two.example.com/rss", title="Two")
+        s.add_all([f1, f2])
+        await s.flush()
+        s1 = Story(title="S1", summary="")
+        s2 = Story(title="S2", summary="")
+        s.add_all([s1, s2])
+        await s.flush()
+        for i, (feed, story) in enumerate([(f1, s1), (f1, s2), (f2, s2)]):
+            s.add(
+                Article(
+                    feed_id=feed.id, guid=f"g{i}", url=f"https://news.example.com/{i}",
+                    title=f"a{i}", story_id=story.id, processing_state="clustered",
+                )
+            )
+        await s.commit()
+        f1_id, f2_id, s1_id = f1.id, f2.id, s1.id
+
+    feeds = {f["id"]: f for f in (await client.get("/api/feeds")).json()}
+    # f1 links 2 stories, f2 links 1 (shared story counted once per feed)
+    assert feeds[f1_id]["story_count"] == 2
+    assert feeds[f1_id]["unread_story_count"] == 2
+    assert feeds[f2_id]["story_count"] == 1
+    assert feeds[f2_id]["unread_story_count"] == 1
+
+    # mark S1 read → f1's unread drops, f2's unchanged
+    assert (await client.post(f"/api/stories/{s1_id}/read")).status_code == 204
+    feeds = {f["id"]: f for f in (await client.get("/api/feeds")).json()}
+    assert feeds[f1_id]["story_count"] == 2
+    assert feeds[f1_id]["unread_story_count"] == 1
+    assert feeds[f2_id]["unread_story_count"] == 1
+
+
 async def test_manual_refresh(client: AsyncClient, db_session, monkeypatch) -> None:
     """Force-refresh endpoints bypass the schedule (SPEC §6)."""
     from tests.test_ingest import RSS, _ok_http

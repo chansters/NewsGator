@@ -17,6 +17,7 @@ from app.api import (
     favicons,
     feed,
     feeds,
+    mail,
     ops,
     stories,
     usage,
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/api")
     app.include_router(users.router, prefix="/api")
     app.include_router(feeds.router, prefix="/api")
+    app.include_router(mail.router, prefix="/api")
     app.include_router(categories.router, prefix="/api")
     app.include_router(settings_api.router, prefix="/api")
     app.include_router(stories.router, prefix="/api")
@@ -130,6 +132,19 @@ ALEMBIC_DIR = BACKEND_DIR / "alembic"
 # no alembic_version table. Each entry maps schema markers that must ALL be
 # present to the revision such a DB should be stamped at, newest first.
 _LEGACY_STAMPS: list[tuple[list[tuple[str, str]], str]] = [
+    (
+        [
+            ("mail_account", "last_uid"),
+            ("feed", "sender_email"),
+            ("article", "newsletter_intro"),
+            ("chat_message", "stories_json"),
+            ("llm_usage", "estimated"),
+            ("story", "readeck_bookmark_id"),
+            ("feed", "backfill_days"),
+            ("user", "story_filter"),
+        ],
+        "0012_newsletter_mail",
+    ),
     (
         [
             ("chat_message", "stories_json"),

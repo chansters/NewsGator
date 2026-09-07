@@ -33,9 +33,39 @@ async def test_pipeline_snapshot(client: AsyncClient, db_session) -> None:
     assert body["states"] == ["fetched", "fulltext", "summarized", "embedded", "clustered"]
     titles = {row["title"] for row in body["rows"]}
     assert {"In flight", "Done"} <= titles
+    assert body["in_flight"] == 1
+    assert body["truncated"] is False
     row = next(r for r in body["rows"] if r["title"] == "In flight")
     assert row["feed_title"] == "X Feed"
     assert row["processing_state"] == "fulltext"
+
+
+async def test_pipeline_shows_all_in_flight_and_caps_finished(
+    client: AsyncClient, db_session
+) -> None:
+    from app.models import Article, Feed
+
+    await setup_admin(client)
+    async with db_session() as s:
+        feed = Feed(url="https://x.example.com/rss", title="X Feed")
+        s.add(feed)
+        await s.flush()
+        # an old in-flight article whose id is lower than all finished ones
+        s.add(Article(feed_id=feed.id, guid="old", url="https://x.example.com/old",
+                      title="Old in flight", processing_state="embedded"))
+        for i in range(30):
+            s.add(Article(feed_id=feed.id, guid=f"d{i}", url=f"https://x.example.com/d{i}",
+                          title=f"Done {i}", processing_state="clustered"))
+        await s.commit()
+
+    r = await client.get("/api/activity/pipeline")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["in_flight"] == 1
+    assert body["rows"][0]["title"] == "Old in flight"  # in-flight first
+    finished = [row for row in body["rows"] if row["processing_state"] == "clustered"]
+    assert len(finished) == 20  # capped, most recent first
+    assert finished[0]["title"] == "Done 29"
 
 
 async def test_recent_returns_events_and_queue_depth(client: AsyncClient, db_session) -> None:

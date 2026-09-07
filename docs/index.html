@@ -287,7 +287,8 @@ footer a { color: var(--muted); text-decoration: none; } footer a:hover { color:
   <div class="eyebrow"><span class="pulse"></span> Self-hosted · Open source · AI-assisted</div>
   <h1>News,<br /><span class="grad">distilled.</span></h1>
   <p class="lede">
-    NewsGator reads your RSS feeds, merges the five articles covering the same event into
+    NewsGator reads your RSS feeds <b>and your newsletter inbox</b>, merges the five
+    articles covering the same event into
     a single <b>Story</b>, and hands you an honest headline, a two-minute summary and the
     sources — so you spend your time only on what deserves it.
   </p>
@@ -402,8 +403,10 @@ footer a { color: var(--muted); text-decoration: none; } footer a:hover { color:
       <div class="step reveal">
         <div class="rail"><div class="bubble">📡</div><div class="wire"></div></div>
         <div>
-          <h3>Ingest <span class="tag">RSS / ATOM</span></h3>
-          <p>Polls your feeds like any reader. New entries are deduplicated and queued —
+          <h3>Ingest <span class="tag">RSS / ATOM / IMAP</span></h3>
+          <p>Polls your feeds like any reader — and your newsletter mailbox too: each
+          sender becomes a feed, the LLM strips the footer/sponsor chrome and keeps the
+          human-written intro. New entries are deduplicated and queued —
           nothing is ever lost, even across restarts.</p>
         </div>
       </div>
@@ -516,14 +519,16 @@ footer a { color: var(--muted); text-decoration: none; } footer a:hover { color:
     </div>
     <div class="features">
       <div class="feature reveal"><div class="ico">🗞️</div><h4>Story clustering</h4><p>Duplicate coverage merges into one Story with a versioned, evolving summary.</p></div>
-      <div class="feature reveal d1"><div class="ico">💬</div><h4>Chat your archive</h4><p>Ask questions across everything you've loaded — the answer is grounded in your Stories and cites its sources.</p></div>
+      <div class="feature reveal d1"><div class="ico">�</div><h4>Newsletters are feeds too</h4><p>Point an IMAP folder at your newsletters — per user, read-only — and they join the same pipeline as any feed.</p></div>
+      <div class="feature reveal d2"><div class="ico">�💬</div><h4>Chat your archive</h4><p>Ask questions across everything you've loaded — the answer is grounded in your Stories and cites its sources.</p></div>
       <div class="feature reveal d2"><div class="ico">🌍</div><h4>Your language</h4><p>Headlines and summaries written in the language you configure — per user.</p></div>
       <div class="feature reveal d3"><div class="ico">📤</div><h4>Share, translated</h4><p>Share a Story to family in <em>their</em> language — translated on demand, sources included.</p></div>
       <div class="feature reveal"><div class="ico">📑</div><h4>Readeck export</h4><p>One tap pushes a permanent, self-contained copy to your Readeck instance.</p></div>
       <div class="feature reveal d1"><div class="ico">👁️</div><h4>Honest read state</h4><p>Read stays read. New facts on a read Story badge it “updated”, never unread.</p></div>
       <div class="feature reveal d2"><div class="ico">👥</div><h4>Multi-user</h4><p>Admin-managed accounts; read state and language are per user.</p></div>
       <div class="feature reveal d3"><div class="ico">📱</div><h4>PWA + dark mode</h4><p>Installs on iOS &amp; Android, follows your OS theme, works on flaky networks.</p></div>
-      <div class="feature reveal"><div class="ico">📈</div><h4>Full observability</h4><p>Live activity stream of every pipeline decision, plus an LLM usage dashboard.</p></div>
+      <div class="feature reveal"><div class="ico">�️</div><h4>Story RSS feed</h4><p>Your distilled Stories are themselves an RSS feed — read them back in any reader you like.</p></div>
+      <div class="feature reveal d1"><div class="ico">📈</div><h4>Full observability</h4><p>Live activity stream of every pipeline decision, a real-time LLM interaction trace, and an LLM usage dashboard.</p></div>
     </div>
   </div>
 </section>

@@ -65,7 +65,8 @@ the full normative spec — **read it before non-trivial changes**.
   `workers/` (scheduler jobs). Business logic in services, not routers.
 - **LLM calls**: go through the single client wrapper (timeouts, retries, JSON-mode
   validation with one retry). Prompts live in one prompts module; always request
-  structured JSON.
+  structured JSON. Annotate each call site with `llmtrace.context(kind, label=…,
+  article_id=…)` so the Activity-page live trace shows what is being asked.
 - **Async**: FastAPI handlers and LLM/HTTP I/O are async; blocking work (feedparser,
   trafilatura) runs via `anyio.to_thread`.
 - **Tests**: pytest + httpx AsyncClient; mock the LLM client in tests. Run `pytest`
@@ -87,10 +88,21 @@ tests green, ruff + mypy + svelte-check clean. Post-release additions: OPML feed
 import (`POST /api/feeds/import-opml` + Feeds-page upload), LLM key handling fixes
 (GUI only persists changed fields; test-llm shows key hint), story images
 (`article.image_url` from RSS media/enclosures, else the first real `<img>` in
-the entry HTML — pixels/emoji skipped — else the page's `og:image` recovered
+the entry HTML — pixels/emoji **and lazy-load placeholder srcs**
+(`placeholder.svg` & co., e.g. PlayStation Blog; feedparser's sanitizer strips
+the `data-src` holding the real URL, so the entry counts as image-less) — else
+the page's `og:image` recovered
 during the direct full-text fetch via trafilatura metadata; both always on, no
 setting) → `story.image_url` lead image, backfilled on attach/merge; Alembic
-0005; `image_recovered` flag in the `fulltext_fetch` event, headline refresh (the merge LLM call
+0005; `image_recovered` flag in the `fulltext_fetch` event (plus
+`date_recovered` for mail feeds — newsletter articles start with the email's
+`Date:` header as `published_at`, and the direct full-text fetch replaces it
+with the linked page's publication date from EXPLICIT metadata only
+(`_explicit_page_date` in fulltext.py: og/article meta + JSON-LD; trafilatura's
+own metadata date GUESSES from URL paths and copyright years — measured:
+anthropic.com/research → 2023-11-03, bfl.ai → Jan 1st — so it is not used for
+dates; in any doubt the email date stays). RSS entries keep the feedparser
+date), headline refresh (the merge LLM call
 also returns a new `headline` when new facts bump `story.version`), immediate
 first poll (adding a feed or OPML-importing kicks `poll_feeds_background` in
 `ingest.py` right away — skipped when `ENVIRONMENT=test`, like the scheduler).
@@ -113,13 +125,23 @@ works offline in the PWA; swipe right (or the back button) returns to the
 last story. The deck is chosen
 by input capability, not width: `matchMedia('(pointer: coarse)')` — touch-first
 devices (iPhone, iPad, Android) get it even on large screens, since iPadOS
-reports as macOS to UA sniffing. Dark mode follows the OS via
+reports as macOS to UA sniffing. A committed swipe flies the card fully
+off-screen (viewport width, not a fixed px — wide iPads need more than the
+centered 960px column): `.deckviewport` must NOT clip overflow, or the card
+disappears under the grey page gutters beside the column instead of sliding
+over them; horizontal page overflow is clipped once at the html level
+(`overflow-x: clip` in `+layout.svelte` — on html, never body, so
+position:sticky keeps working).
+Dark mode follows the OS via
 `prefers-color-scheme`: all colors are CSS custom properties defined in
 `routes/+layout.svelte` (`--bg`/`--surface`/`--text`/`--accent`/…) with a
 dark override block — never hardcode hex colors in component styles;
 `app.html` carries `color-scheme` + media-scoped `theme-color` metas.
 Mobile layout rule: nothing may overflow the viewport horizontally (it
-side-scrolls the whole PWA, nav included) — wide tables sit in an
+side-scrolls the whole PWA, nav included) — the single enforcement point is
+`overflow-x: hidden; overflow-x: clip` on `:global(html)` in
+`+layout.svelte`, component-level clipping only when content must be cut
+visually (never on `.deckviewport`, see above). Wide tables sit in an
 `overflow-x: auto` wrapper (`.tablewrap` pattern: Activity, Usage, Settings
 report), global inputs are `max-width: 100%; box-sizing: border-box`, flex
 rows that hold inputs use `flex-wrap: wrap` + `min-width: 0`, and the mobile
@@ -291,6 +313,117 @@ localStorage) — that endpoint issues a portable token for the authenticated
 user and exists because localStorage may be empty mid-session even with a
 valid cookie (observed on iOS standalone PWA, where the URL rendered with an
 empty `token=`).
+Newsletter ingestion (2026-09-06): per-user IMAP accounts (Alembic 0012
+`mail_account`: host/port/username/password/folder — folder mandatory,
+password write-only in the API — plus `feed.kind` `rss|mail`,
+`feed.sender_email`, `article.newsletter_intro`). Router `api/mail.py`
+(`/mail-accounts`, current_user-scoped, 404 across users; `POST /{id}/test`
+probes login+folder, `POST /{id}/poll` polls now). Service
+`services/mailnews.py`: the scheduler's `mail_poll_sweep` (every
+`MAIL_POLL_MINUTES`, default 15) polls each enabled account READ-ONLY
+(`SELECT readonly` + `BODY.PEEK[]` — never flags \Seen) with a per-message
+persisted UID watermark (`last_uid`), capped at `MAIL_MAX_MESSAGES_PER_POLL`
+(default 20), first-sync skips messages older than `FEED_BACKFILL_DAYS` (0 =
+all). IMAP hardening (2026-09-07): every connection uses a 30s socket timeout
+(`_TimeoutIMAP4`/`_TimeoutIMAP4SSL` in mailnews.py — imaplib otherwise
+inherits the infinite global socket timeout and a stalled server wedges the
+GUI "Poll now" request forever), and polling is split search/fetch:
+`POST /mail-accounts/{id}/poll` runs only the fast SEARCH synchronously
+(answers 202 with the count), then a background task downloads bodies
+(`fetch_messages_by_uid`) and processes them — body-download failures land on
+`mail_fetch_error` events + `account.last_error`. The scheduler's
+`poll_account` still uses the combined `fetch_new_messages` (search+fetch).
+IMAP seam `_imap_connect` is module-level for monkeypatching.
+One poll at a time per account (`_polling_accounts` set in mailnews.py,
+`try_begin_poll`/`end_poll`): the poll-now endpoint holds it from the search
+phase until the background task finishes (released in a `finally`, 409 while
+busy) and the scheduler's `poll_account` silently skips a busy account — the
+UID watermark only advances per processed message, so a concurrent poll would
+redo the same messages and double every LLM call. The two LLM passes use
+distinct llmtrace labels (`clean:` / `extract:` prefixes) so the Activity
+page's LLM-interactions card doesn't show two identical-looking lines for the
+same email.
+sender (From:) becomes a mail Feed (title = display name, pseudo-URL
+`newsletter:{email}` — keeps url unique; event `newsletter_feed_created`;
+icon = sender domain via the favicon proxy). Link extraction is CODE-FIRST
+(`extract_links`: lxml anchors, junk/share/tracking/empty-anchor filters,
+canonicalized dedupe) then refined by TWO LLM passes per message. Pass 1
+(`prompts.newsletter_clean`, config `NEWSLETTER_LLM_CLEAN`, default on, usage
+kind `newsletter_clean`, events `newsletter_clean_start/done/error`) shows the
+model the FULL email rendered as text with placeholder link tokens
+(`render_with_placeholders`: `[anchor](«L42»)` — the real URLs stay in a
+code-side map, halving prompt tokens vs. full URLs) and lets it DELETE the
+non-news chrome (intro, socials/footer, sponsors, platform self-links);
+`_llm_clean_filter` resolves surviving placeholders and intersects with the
+code candidates (hallucination impossible by construction), None on
+off/failure = keep all (disabling pass 1 means NO LLM filtering happens).
+Deletion-only filtering is far more reliable for small
+models than one-pass triage — measured on Tech Café: 0 junk / 0 lost vs. 17
+junk kept one-pass. Pass 2 (`prompts.newsletter_extract`, config
+`NEWSLETTER_LLM_EXTRACT`, usage kind `newsletter_extract`) is pure text
+mapping — NO triage (a stale `keep:false` field is ignored): each SURVIVING
+link gets a composed title (never just the anchor's domain name) + the
+human-written intro —
+validated against the code-extracted URL set (hallucinated URLs dropped),
+heuristic block-text fallback (`_fallback_intro`). Pass 1 uses
+`llm_client.chat_text` (free-form, no JSON mode/retry — same trace/usage
+capture as chat_json; tests stub `chat_text`, the autouse fixture returns the
+prompt unchanged). Each link becomes an
+Article on the mail feed (`newsletter_intro` set, intro also as `raw_content`
+fallback) and follows the standard fulltext → summarize → embed → cluster
+pipeline (same writer-lock discipline: LLM call before any article flush,
+full-text after the batch commit). In `cluster._create_story`, a NEW story's
+summary is `article.newsletter_intro or article.summary` — human editorial
+text preferred; embeddings/clustering still use the LLM summary (invariant
+2), and the next merge rewrites in SUMMARY_LANGUAGE. Mail feeds are excluded
+from `poll_due_feeds`/`refresh_all` and `POST /feeds/{id}/refresh` 400s on
+them; deleting a mail account keeps its feeds/articles. GUI: "Newsletter
+inboxes (IMAP)" card on Settings (all users) with Test/Poll-now; Feeds page
+shows a ✉ newsletter badge + sender favicon and hides RSS-only controls.
+Legacy stamps: 0012 top entry keyed on `("mail_account", "last_uid")`.
+LLM interaction trace (2026-09-07): every external LLM call (chat_json/embed in
+llm_client) is recorded in an in-memory ring (`services/llmtrace.py`, last 100,
+deliberately never in the DB — prompts carry full article text) and broadcast over
+the activity SSE stream as `llm_interaction` payloads (status running → done|error,
+with truncated system/user prompts or embedding input stats, the raw reply, latency,
+token usage from `last_usage`, and the attempt count). Call sites annotate the
+task-local `llmtrace.context(kind, label=…, article_id=…)` ContextVar — same
+pattern as `llm_client.last_usage`, so chat_json/embed signatures are unchanged and
+test monkeypatching still works. Kinds reuse the usage.py vocabulary +
+probe/other. Snapshot endpoint `GET /api/activity/llm` (any authenticated user);
+GUI: "LLM interactions" card on the Activity page (live status dots, expandable
+prompt/reply, auto-open while running). Config `LLM_TRACE_ENABLED` (default on) /
+`LLM_TRACE_MAX_CHARS` (default 8000, per-field clamp) — both whitelisted in
+settings and in the Settings GUI "LLM server" group. No schema change, no new
+activity-log events (the trace rides the SSE stream directly).
+Feed filter + feed counts + feed favicons (2026-09-07): `GET /api/stories`
+gains `feed={id}` (only stories with ≥1 source article from that feed) and a
+`GET /api/stories/feed-options` endpoint (declared before `/{story_id}`) lists
+feeds having stories — any authenticated user, since feeds CRUD is admin-only
+but everyone can filter. The Stories page toolbar has a feed dropdown
+(transient — NOT a persisted per-user pref like filter/sort/order; the Feeds
+page count badge links to `/?feed=N` which the page reads on mount).
+`GET /api/feeds` now reports `story_count`/`unread_story_count` per feed
+(unread is per the requesting user; `FeedOut` defaults them to 0 so
+single-feed endpoints stay valid — the GUI re-lists after every mutation).
+Favicon proxy hardening: `_fetch_favicon` (still the monkeypatch seam) walks a
+chain per host — `/favicon.ico`, then the homepage's `<link rel=…icon…>`
+(`_icon_links` regex parser), then parent domains down to two labels
+(`mail.example.com` → `example.com`). All fetches send a desktop-Chrome
+User-Agent (`_HEADERS`): bot protection (Cloudflare & co.) 403s the default
+`python-httpx` UA even on `/favicon.ico` (arstechnica, phoronix, …), so
+without it most icons 404. Some hosts still legitimately 404 (hard-blocked
+sites like theinformation.com, bare CDN asset hosts) — failures are cached
+1h (`_FAILURE_TTL_S`) so they're only re-probed hourly and after restarts.
+The Feeds page shows a favicon for
+every feed (RSS URL host / newsletter sender domain via `feedHost()` in
+`lib/api.ts`) with an onerror removal fallback.
+Pipeline snapshot completeness (2026-09-07): `GET /api/activity/pipeline` now
+returns **every** in-flight article (`processing_state != 'clustered'`, id
+desc, hard cap `_IN_FLIGHT_CAP = 500` with a `truncated` flag) followed by the
+20 most recent finished ones (`_FINISHED_ROWS`) — no more "60 newest articles"
+window that hid old re-queued items. The response adds `in_flight` and
+`truncated`; the Activity page header shows the in-flight count.
 
 Notes on the current code:
 - Backend lives in `backend/src/app/` (`api/`, `core/`, `models/`, `services/`,

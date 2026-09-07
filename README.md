@@ -13,21 +13,35 @@ philosophy behind it, and how it feels to use.
 - **Stories, not article lists** — RSS feeds are ingested, full-text fetched
   (trafilatura + readability fallback), summarized in your language, embedded, and
   clustered into Stories with a merged summary that versions as new facts arrive.
+- **Newsletters are feeds too** — point a per-user IMAP account + folder at your
+  newsletter mailbox (Settings) and every sender becomes a feed: article links are
+  extracted from each message (code-first parsing, then two LLM passes — one
+  deletes the intro/socials/sponsor chrome from the full email using placeholder
+  link tokens, one recovers the human-written intro text per surviving link),
+  then processed like any RSS entry. New stories show
+  the newsletter's own intro instead of the machine summary, and the article's
+  publication date comes from the linked page's explicit metadata
+  (og/JSON-LD) when it exists — otherwise the email's date (never guessed from
+  URLs or copyright lines).
 - **Your LLM, your data** — works with any OpenAI-compatible server (oMLX, Ollama,
   llama.cpp, LM Studio…). Nothing is hardcoded to a provider; articles never leave
   infrastructure you chose.
 - **Multi-user with per-user read state** — read stories that receive new facts come
-  back as "updated", never as unread noise.
+  back as "updated", never as unread noise. Filter the story list by feed, and see
+  per-feed story/unread counts on the Feeds page.
 - **Ask your archive** — a built-in chatbot answers questions across everything
   you've loaded (RAG): your question is embedded and matched against story
   centroids, the top story summaries ground the answer, and cited stories are
   rendered as clickable cards. History is stored per user, so it follows you
   across devices.
-- **Full visibility** — live activity stream (SSE) for every pipeline stage, and LLM
+- **Full visibility** — live activity stream (SSE) for every pipeline stage, a live
+  LLM interaction trace (see each prompt and its reply as it happens), and LLM
   token-usage metrics per day/stage/model/feed with a price playground.
 - **Quality-of-life** — PWA (installable, works on iOS), dark mode, mobile swipe
-  deck, OPML import, favicons, story sharing with on-demand translation, optional
-  Readeck integration.
+  deck, OPML import, favicons (feed icons included — with homepage `<link rel=icon>`
+  and parent-domain fallback for newsletter sender domains), story sharing with
+  on-demand translation, your Stories re-exposed as an RSS feed
+  (`GET /api/feed.xml`), optional Readeck integration.
 - **Simple to run** — one Docker container, SQLite by default (sqlite-vec for
   vectors), optional external Qdrant.
 

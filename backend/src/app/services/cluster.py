@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models import Article, ClusterDecision, Story, StoryRevision
-from app.services import activity, llm_client, prompts, usage
+from app.services import activity, llm_client, llmtrace, prompts, usage
 from app.services.vectorstore import cosine_similarity, get_vector_store
 
 HALF_LIFE_HOURS = 24.0
@@ -39,10 +39,11 @@ async def cluster_article(session: AsyncSession, article_id: int) -> None:
 
     embed_text = f"{article.title}\n\n{article.summary}"
     start = time.monotonic()
-    vec = np.asarray(
-        (await llm_client.embed([embed_text]))[0],
-        dtype=np.float32,
-    )
+    with llmtrace.context("cluster_embed", label=article.title, article_id=article.id):
+        vec = np.asarray(
+            (await llm_client.embed([embed_text]))[0],
+            dtype=np.float32,
+        )
     usage.record(
         session,
         "cluster_embed",
@@ -115,7 +116,8 @@ async def _gray_zone_check(
     assert article.summary is not None
     try:
         system, user = prompts.pairwise_same_event(story.summary, article.summary)
-        result, latency_ms = await llm_client.chat_json(system, user)
+        with llmtrace.context("pairwise", label=story.title, article_id=article.id):
+            result, latency_ms = await llm_client.chat_json(system, user)
         usage.record(
             session,
             "pairwise",
@@ -164,7 +166,8 @@ async def _create_story(
     headline: str | None = None
     try:
         system, user = prompts.story_headline([article.summary])
-        result, latency_ms = await llm_client.chat_json(system, user)
+        with llmtrace.context("headline", label=article.title, article_id=article.id):
+            result, latency_ms = await llm_client.chat_json(system, user)
         headline = str(result.get("headline", ""))
         usage.record(
             session,
@@ -183,7 +186,11 @@ async def _create_story(
     session.add(story)
     await session.flush()
     story.title = headline or article.title
-    story.summary = article.summary
+    # Newsletter articles carry the human-written intro from the email: prefer it
+    # over the LLM summary for NEW stories (user decision — it is often editorial
+    # content). Embeddings/clustering still used the LLM summary (invariant 2),
+    # and the first merge with new facts rewrites the summary in SUMMARY_LANGUAGE.
+    story.summary = article.newsletter_intro or article.summary
     story.image_url = article.image_url
     session.add(StoryRevision(story_id=story.id, version=1, summary=story.summary))
     await get_vector_store(session).upsert_story_centroid(story.id, list(vec))
@@ -199,7 +206,8 @@ async def _attach_to_story(
     has_new_facts = True
     try:
         system, user = prompts.novelty_check(story.summary, article.summary)
-        result, latency_ms = await llm_client.chat_json(system, user)
+        with llmtrace.context("novelty", label=story.title, article_id=article.id):
+            result, latency_ms = await llm_client.chat_json(system, user)
         usage.record(
             session,
             "novelty",
@@ -217,7 +225,8 @@ async def _attach_to_story(
     if has_new_facts:
         try:
             system, user = prompts.merge_story_summary(story.summary, article.summary)
-            merged, latency_ms = await llm_client.chat_json(system, user)
+            with llmtrace.context("merge", label=story.title, article_id=article.id):
+                merged, latency_ms = await llm_client.chat_json(system, user)
             usage.record(
                 session,
                 "merge",

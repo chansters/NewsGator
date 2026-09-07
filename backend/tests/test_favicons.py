@@ -65,6 +65,62 @@ async def test_favicon_host_validation(client: AsyncClient) -> None:
     assert (await client.get("/api/favicon?host=..%2Fetc")).status_code == 400
 
 
+async def test_favicon_parent_domain_fallback(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subdomain with no icon of its own falls back to the parent domain
+    (newsletter senders are often mail.example.com)."""
+    await setup_admin(client)
+    tried: list[str] = []
+
+    async def fake_host_fetch(host: str) -> tuple[bytes, str]:
+        tried.append(host)
+        if host == "example.com":
+            return PNG, "image/png"
+        raise ValueError("no favicon found")
+
+    monkeypatch.setattr(favicons, "_fetch_host_favicon", fake_host_fetch)
+
+    r = await client.get("/api/favicon?host=mail.example.com")
+    assert r.status_code == 200
+    assert r.content == PNG
+    assert tried == ["mail.example.com", "example.com"]
+
+
+async def test_favicon_parent_fallback_stops_at_two_labels(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never strip below the registrable-looking domain (foo.co.uk stays)."""
+    await setup_admin(client)
+    tried: list[str] = []
+
+    async def fake_host_fetch(host: str) -> tuple[bytes, str]:
+        tried.append(host)
+        raise ValueError("no favicon found")
+
+    monkeypatch.setattr(favicons, "_fetch_host_favicon", fake_host_fetch)
+
+    assert (await client.get("/api/favicon?host=a.b.co.uk")).status_code == 404
+    assert tried == ["a.b.co.uk", "b.co.uk", "co.uk"]
+
+
+def test_icon_links_parsing() -> None:
+    html = '''
+      <html><head>
+        <link rel="stylesheet" href="/style.css">
+        <link rel="shortcut icon" href="/favicon.ico">
+        <link href="https://cdn.example.com/icon.png" rel="apple-touch-icon">
+        <link rel="icon" type="image/svg+xml" href="/icon.svg">
+      </head></html>
+    '''
+    assert favicons._icon_links(html) == [
+        "/favicon.ico",
+        "https://cdn.example.com/icon.png",
+        "/icon.svg",
+    ]
+    assert favicons._icon_links("<p>no links</p>") == []
+
+
 async def test_favicon_requires_auth(client: AsyncClient) -> None:
     await setup_admin(client)
     await client.post("/api/auth/logout")
