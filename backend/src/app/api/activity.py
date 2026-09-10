@@ -21,7 +21,7 @@ from app.services.process import queue_depth
 router = APIRouter(prefix="/activity", tags=["activity"])
 
 # Pipeline states in execution order (invariant 7)
-_PIPELINE_STATES = ["fetched", "fulltext", "summarized", "embedded", "clustered"]
+_PIPELINE_STATES = ["fetched", "fulltext", "summarized", "embedded", "clustered", "filtered"]
 
 
 class EventOut(BaseModel):
@@ -84,7 +84,7 @@ async def pipeline(
     base = select(Article, Feed.title).join(Feed, Article.feed_id == Feed.id)
     in_flight = (
         await session.execute(
-            base.where(Article.processing_state != "clustered")
+            base.where(Article.processing_state.not_in(["clustered", "filtered"]))
             .order_by(desc(Article.id))
             .limit(_IN_FLIGHT_CAP + 1)  # one extra to detect truncation
         )

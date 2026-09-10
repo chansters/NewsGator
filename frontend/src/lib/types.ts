@@ -10,6 +10,8 @@ export interface User {
   story_order: '' | 'asc' | 'desc';
   // '' = follow the server default (unread)
   story_filter: '' | 'all' | 'unread' | 'updated';
+  // Empty = process all categories.
+  category_interests: string[];
 }
 
 export interface AuthUser extends User {

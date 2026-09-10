@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, TypeDecorator
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, TypeDecorator
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,6 +52,8 @@ class User(Base):
     story_order: Mapped[str] = mapped_column(String(8), default="")
     # Per-user story-list filter pref; empty = server default (unread)
     story_filter: Mapped[str] = mapped_column(String(16), default="")
+    # Empty = all categories; otherwise categories this user wants processed.
+    category_interests: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
@@ -162,6 +164,10 @@ class Article(Base):
     language: Mapped[str] = mapped_column(String(8), default="")
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Preliminary category from the headline-only classifier; Article.category
+    # remains the authoritative body-based category.
+    headline_category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    filter_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     story_id: Mapped[int | None] = mapped_column(ForeignKey("story.id"), nullable=True)
     # Human-written intro extracted from the source newsletter (mail feeds only).
     # The LLM summary still drives embeddings/clustering (invariant 2), but a NEW

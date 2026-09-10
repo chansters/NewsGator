@@ -6,6 +6,7 @@
   import type { Category, MailAccount, ManagedUser } from '$lib/types';
 
   let language = $state('');
+  let categoryInterests = $state<string[]>([]);
   let saved = $state(false);
   let categories = $state<Category[]>([]);
   let newCategory = $state('');
@@ -266,6 +267,7 @@
 
   onMount(async () => {
     language = $currentUser?.summary_language ?? '';
+    categoryInterests = [...($currentUser?.category_interests ?? [])];
     mailAccounts = await api.mailAccounts.list();
     // Token for the RSS URL: prefer a fresh one from the backend (works when
     // localStorage lost it), fall back to whatever is already stored.
@@ -274,12 +276,11 @@
     } catch {
       /* keep the localStorage value */
     }
-    // Categories for the feed filter come from the stories list — the taxonomy
-    // endpoint is admin-only.
+    // Load the taxonomy for category filters and per-user interests.
     const stories = await api.stories.list();
     feedCategories = [...new Set(stories.map((s) => s.category))].sort();
+    categories = await api.categories.list();
     if ($currentUser?.is_admin) {
-      categories = await api.categories.list();
       users = await api.users.list();
       const s = await api.settings.get();
       sys = s.values;
@@ -328,7 +329,7 @@
   }
 
   async function saveLanguage() {
-    $currentUser = await api.patchMe({ summary_language: language });
+    $currentUser = await api.patchMe({ summary_language: language, category_interests: categoryInterests });
     saved = true;
     setTimeout(() => (saved = false), 2000);
   }
@@ -415,7 +416,35 @@
     empty = global default)
     <input bind:value={language} maxlength="8" placeholder="en" />
   </label>
-  <button onclick={saveLanguage}>Save</button>
+  <fieldset>
+    <legend>Categories of interest</legend>
+    <p class="hint">
+      Empty means all categories. Headlines outside your selection are filtered before
+      full-text retrieval; ambiguous headlines continue to body summarization.
+    </p>
+    {#if categories.length}
+      <div class="categorychecks">
+        {#each categories as c (c.id)}
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={categoryInterests.includes(c.name)}
+              onchange={(e) => {
+                const checked = e.currentTarget.checked;
+                categoryInterests = checked
+                  ? [...categoryInterests, c.name]
+                  : categoryInterests.filter((name) => name !== c.name);
+              }}
+            />
+            {c.name}
+          </label>
+        {/each}
+      </div>
+    {:else}
+      <p class="hint">Categories will be available after an administrator loads the taxonomy.</p>
+    {/if}
+  </fieldset>
+  <button onclick={saveLanguage}>Save preferences</button>
   {#if saved}<span class="ok">Saved ✓</span>{/if}
 </div>
 
@@ -727,6 +756,9 @@
   .add { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .add input { flex: 1 1 9rem; min-width: 0; }
   .feedopts { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 0.6rem; }
+  fieldset { border: 1px solid var(--table-border); border-radius: 6px; margin: 1rem 0; padding: 0.75rem; }
+  legend { padding: 0 0.35rem; font-weight: 600; }
+  .categorychecks { display: flex; gap: 0.75rem 1rem; flex-wrap: wrap; }
   .feedopts label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.9em; }
   .feedopts .check { flex-direction: row; align-items: center; gap: 0.35rem; padding-bottom: 0.35rem; }
   .feedurl { display: flex; gap: 0.5rem; }

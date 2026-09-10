@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_session
-from app.models import Article, Category
+from app.models import Article, Category, User
 from app.services import activity, llm_client, llmtrace, prompts, usage
 from app.services.vectorstore import get_vector_store
 
@@ -94,11 +94,89 @@ async def process_article(session: AsyncSession, article_id: int) -> None:
     summarized = await summarize_article(session, article)
     if not summarized:
         return  # LLM failed — article stays in 'fulltext', retried on next sweep
+    interests = await interested_categories(session)
+    if interests and article.category not in interests:
+        article.filter_reason = "body_out_of_scope"
+        article.processing_state = "filtered"
+        await activity.emit(
+            session,
+            "llm",
+            "article_filtered",
+            {
+                "article_id": article.id,
+                "category": article.category,
+                "reason": article.filter_reason,
+            },
+        )
+        await session.commit()
+        return
     await embed_article(session, article)
     from app.services.cluster import cluster_article  # avoid import cycle at module load
 
     await cluster_article(session, article_id)
     await session.commit()
+
+
+async def interested_categories(session: AsyncSession) -> set[str]:
+    """Return configured user interests; empty means at least one user wants all."""
+    rows = (await session.scalars(select(User.category_interests))).all()
+    if not rows or any(not interests for interests in rows):
+        return set()
+    return {category for interests in rows for category in (interests or [])}
+
+
+async def classify_headline(
+    session: AsyncSession, article: Article, feed_title: str
+) -> bool:
+    """Classify a headline and return whether body processing should continue."""
+    interests = await interested_categories(session)
+    if not interests:
+        return True  # no preference configured: preserve existing all-category behavior
+
+    taxonomy = (await session.scalars(select(Category.name).order_by(Category.name))).all()
+    try:
+        system, user = prompts.classify_headline(article.title, feed_title, list(taxonomy))
+        with llmtrace.context("classify", label=article.title, article_id=article.id):
+            result, latency_ms = await llm_client.chat_json(system, user)
+        category = str(result.get("category", "Uncertain"))
+        article.headline_category = category if category in taxonomy else "Uncertain"
+        usage.record(
+            session,
+            "classify",
+            endpoint="chat",
+            model=settings.llm_model,
+            latency_ms=latency_ms,
+            article=article,
+            prompt_chars=len(system) + len(user),
+            completion_chars=len(category),
+        )
+    except llm_client.LLMError as exc:
+        article.headline_category = "Uncertain"
+        await activity.emit(
+            session,
+            "llm",
+            "classify_error",
+            {"article_id": article.id, "error": str(exc)},
+            level="error",
+        )
+
+    if article.headline_category not in interests and article.headline_category != "Uncertain":
+        article.filter_reason = "headline_out_of_scope"
+        article.processing_state = "filtered"
+        await activity.emit(
+            session,
+            "llm",
+            "article_filtered",
+            {
+                "article_id": article.id,
+                "category": article.headline_category,
+                "reason": article.filter_reason,
+            },
+        )
+        await session.commit()
+        return False
+    await session.commit()
+    return True
 
 
 async def summarize_article(session: AsyncSession, article: Article) -> bool:

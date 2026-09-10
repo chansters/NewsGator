@@ -4,21 +4,21 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import admin_user
+from app.api.deps import admin_user, current_user
 from app.api.schemas import CategoryIn, CategoryOut
 from app.core.db import get_session
 from app.models import Category
 
-router = APIRouter(prefix="/categories", tags=["categories"], dependencies=[Depends(admin_user)])
+router = APIRouter(prefix="/categories", tags=["categories"])
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(current_user)])
 async def list_categories(session: AsyncSession = Depends(get_session)) -> list[CategoryOut]:
     rows = await session.scalars(select(Category).order_by(Category.name))
     return [CategoryOut.model_validate(c) for c in rows]
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_user)])
 async def create_category(
     body: CategoryIn, session: AsyncSession = Depends(get_session)
 ) -> CategoryOut:
@@ -32,7 +32,7 @@ async def create_category(
     return CategoryOut.model_validate(cat)
 
 
-@router.patch("/{category_id}")
+@router.patch("/{category_id}", dependencies=[Depends(admin_user)])
 async def rename_category(
     category_id: int, body: CategoryIn, session: AsyncSession = Depends(get_session)
 ) -> CategoryOut:
@@ -44,7 +44,11 @@ async def rename_category(
     return CategoryOut.model_validate(cat)
 
 
-@router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{category_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(admin_user)],
+)
 async def delete_category(category_id: int, session: AsyncSession = Depends(get_session)) -> None:
     cat = await session.get(Category, category_id)
     if cat is None:

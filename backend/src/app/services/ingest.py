@@ -251,6 +251,7 @@ async def _poll_feed_inner(session: AsyncSession, feed: Feed) -> int:
     # starving every other writer (scheduler / LLM worker / API). Fetch full text
     # AFTER the batch commit, in a short per-article transaction instead.
     fulltext_pending: list[int] = []
+    new_article_ids: list[int] = []
     for entry in entries:
         guid = _entry_guid(entry)
         link = str(entry.get("link", ""))
@@ -284,11 +285,7 @@ async def _poll_feed_inner(session: AsyncSession, feed: Feed) -> int:
         session.add(article)
         await session.flush()  # assign id before fulltext stage
 
-        if feed.fetch_fulltext:
-            fulltext_pending.append(article.id)
-        else:
-            article.processing_state = "fulltext"
-            llm_handoff.append(article.id)
+        new_article_ids.append(article.id)
         new_count += 1
 
     if skipped_old:
@@ -303,6 +300,22 @@ async def _poll_feed_inner(session: AsyncSession, feed: Feed) -> int:
             },
         )
     await session.commit()
+    # Headline classification runs after the insert commit so no LLM request is
+    # made while SQLite's writer lock is held. Clearly out-of-scope articles are
+    # filtered before full-text retrieval; Uncertain articles continue.
+    from app.services.process import classify_headline
+
+    for article_id in new_article_ids:
+        art = await session.get(Article, article_id)
+        if art is None or not await classify_headline(session, art, feed.title or feed.url):
+            continue
+        if feed.fetch_fulltext:
+            fulltext_pending.append(article_id)
+        else:
+            art.processing_state = "fulltext"
+            await session.commit()
+            llm_handoff.append(article_id)
+
     # Full-text fetch AFTER the commit above released the writer lock. Each
     # article commits on its own (fetch_full_text leaves the state at 'fulltext'),
     # so the lock is only held for the quick UPDATE, never across the network.

@@ -121,6 +121,7 @@ export const api = {
     story_sort?: 'updated' | 'published' | 'sources';
     story_order?: 'asc' | 'desc';
     story_filter?: 'all' | 'unread' | 'updated';
+    category_interests?: string[];
   }) => req<User>('/auth/me', { method: 'PATCH', body: patch }),
 
   users: {

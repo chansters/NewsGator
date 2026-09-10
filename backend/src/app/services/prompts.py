@@ -42,6 +42,25 @@ Article text:
     return system, user
 
 
+def classify_headline(title: str, feed_title: str, taxonomy: list[str]) -> tuple[str, str]:
+    """Preliminary category from headline context; may return Uncertain."""
+    categories = ", ".join(taxonomy)
+    system = (
+        "You classify news headlines for a personal news reader. "
+        "Reply with ONLY a valid JSON object."
+    )
+    user = f"""Assign this news headline exactly one category from this list: {categories}.
+
+If the headline alone is ambiguous or lacks enough context, return Uncertain.
+Never invent a category.
+
+Reply with JSON: {{"category": "..."}}
+
+Feed: {feed_title}
+Headline: {title}"""
+    return system, user
+
+
 def story_headline(article_summaries: list[str]) -> tuple[str, str]:
     """Generate a short story headline from member article summaries."""
     lang = summary_language_name()
