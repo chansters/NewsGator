@@ -1,5 +1,22 @@
 # Headline Classification and Category Filtering Design
 
+## Implementation Status
+
+Implemented and deployed in commit `ef2bb21` (`Add headline category filtering pipeline`).
+
+The current implementation includes:
+
+- per-user category-interest selection in Settings;
+- headline-only classification before full-text retrieval;
+- explicit `Uncertain` handling;
+- body-based categorization as the authoritative result;
+- early and late filtering with a terminal `filtered` state;
+- migration `0013_headline_category_filter`;
+- Activity-page visibility for recent `classify` LLM calls;
+- 47 passing targeted backend tests, passing Ruff checks, and a successful Docker build.
+
+The clean test environment is active on Snorlax. It currently has one admin account and no feeds, articles, or stories until a test feed is added.
+
 ## Purpose
 
 Reduce unnecessary Ollama processing by classifying RSS headlines immediately after ingestion, before fetching article bodies and running the existing full summarization pipeline.
@@ -28,12 +45,12 @@ fulltext -> summarized -> embedded -> clustered
 
 ## Stage 1: Headline Classification
 
-After an RSS article is inserted, send a small payload to Ollama containing at least:
+After RSS articles are inserted and the insert transaction is committed, send a small payload to Ollama containing at least:
 
 - article headline;
 - feed title, if available;
 - the current category taxonomy;
-- the user’s selected categories of interest.
+- the configured category-interest scope.
 
 The classifier should return structured JSON. The conceptual result is:
 
@@ -144,6 +161,8 @@ This design adds one lightweight classification call for every newly ingested ar
 
 The initial implementation can classify one headline at a time through the existing JSON LLM client. If this creates too much latency, headlines could later be batched into a single request, with one structured result per article.
 
+When no user has configured category interests, the gate is bypassed and all articles follow the existing processing behavior. If multiple users exist, an empty preference means that user wants all categories; therefore filtering is only active when every user has a non-empty preference, and the effective scope is the union of those preferences.
+
 The classification call must not run while SQLite writer changes are left uncommitted. The ingestion code intentionally avoids holding the writer lock across slow network and LLM operations. A safe sequence is:
 
 ```text
@@ -171,3 +190,4 @@ This document records the proposed behavior and implementation constraints. It d
 - changes to the running Docker container;
 - deletion of filtered articles.
 
+The items above describe the original implementation scope; the implementation status at the top of this document records what has now been completed.
